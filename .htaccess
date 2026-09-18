@@ -1,0 +1,7 @@
+DirectoryIndex index.php index.php
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # Redirect bare directory to index.php
+    RewriteRule ^$ index.php [L]
+</IfModule>
