@@ -20,7 +20,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $token_escaped = mysqli_real_escape_string($conn, $token);
             $expires = date("Y-m-d H:i:s", strtotime("+1 hour"));
 
-            $update_sql = "UPDATE users SET reset_token = '$token_escaped', reset_expires = '$expires' WHERE email = '$email'";
+            $update_sql = "UPDATE users SET reset_token = '$token_escaped', reset_token_expires_at = '$expires' WHERE email = '$email'";
             mysqli_query($conn, $update_sql);
 
             $message = "If that email exists, a reset link has been generated. <br><br><strong>Testing Reset Link:</strong> <a href='reset_password.php?token=$token'>Reset Password Here</a>";

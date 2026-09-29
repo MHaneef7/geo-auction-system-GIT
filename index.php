@@ -1,49 +1,69 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
     include_once ('includes/database.php');
-$featured_res = mysqli_query($conn, "
-    SELECT i.*, c.name AS cat_name, u.name AS seller_name,
-        COUNT(b.id) AS bid_count,
-        MAX(b.bid_amount) AS max_bid
-    FROM items i
-    LEFT JOIN categories c ON c.id = i.category_id
-    LEFT JOIN users u ON u.id = i.seller_id
-    LEFT JOIN bids b ON b.item_id = i.id
-    WHERE i.status = 'active'
-    GROUP BY i.id
-    ORDER BY bid_count DESC, i.created_at DESC
-    LIMIT 8
-");
+    include_once ('includes/components/item_card.php');
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
+    $is_logged  = !empty($_SESSION['user_id']);
+    $user_id    = $is_logged ? (int)$_SESSION['user_id'] : 0;
+    $user_name  = $_SESSION['user_name'] ?? '';
+    $user_init  = $is_logged ? strtoupper(substr($user_name, 0, 2)) : '';
+    $user_role  = strtolower(trim($_SESSION['role'] ?? $_SESSION['user_role'] ?? 'buyer'));
 
-$cats_res = mysqli_query($conn, "
-    SELECT c.*, COUNT(i.id) AS item_count
-    FROM categories c
-    LEFT JOIN items i ON i.category_id = c.id AND i.status = 'active'
-    GROUP BY c.id
-    ORDER BY item_count DESC
-    LIMIT 8
-");
-$sellers_res = mysqli_query($conn, "
-    SELECT u.id, u.name, COUNT(i.id) AS item_count
-    FROM users u
-    JOIN items i ON i.seller_id = u.id AND i.status IN ('active','ended')
-    GROUP BY u.id
-    ORDER BY item_count DESC
-    LIMIT 1
-");
-
-    $stats_res  = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active'");
+    $featured_res = mysqli_query($conn, "
+        SELECT i.*, c.name AS cat_name, u.name AS seller_name,
+            COUNT(b.id) AS bid_count,
+            MAX(b.bid_amount) AS max_bid
+        FROM items i
+        LEFT JOIN categories c ON c.id = i.category_id
+        LEFT JOIN users u ON u.id = i.seller_id
+        LEFT JOIN bids b ON b.item_id = i.id
+        WHERE i.status = 'active' AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
+        GROUP BY i.id
+        ORDER BY bid_count DESC, i.created_at DESC
+        LIMIT 8
+    ");
+    $cats_res = mysqli_query($conn, "
+        SELECT c.*, COUNT(i.id) AS item_count
+        FROM categories c
+        LEFT JOIN items i ON i.category_id = c.id AND i.status = 'active' AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
+        GROUP BY c.id
+        ORDER BY item_count DESC
+        LIMIT 8
+    ");
+    $sellers_res = mysqli_query($conn, "
+        SELECT u.id, u.name, COUNT(i.id) AS item_count
+        FROM users u
+        JOIN items i ON i.seller_id = u.id AND i.status IN ('active','ended') AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
+        GROUP BY u.id
+        ORDER BY item_count DESC
+        LIMIT 1
+    ");
+    $stats_res  = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)");
     $live_count = mysqli_fetch_assoc($stats_res)['c'] ?? 0;
     $ubids_res  = mysqli_query($conn, "SELECT COUNT(*) AS c FROM bids");
     $bid_count  = mysqli_fetch_assoc($ubids_res)['c'] ?? 0;
     $usr_res    = mysqli_query($conn, "SELECT COUNT(*) AS c FROM users");
     $user_count = mysqli_fetch_assoc($usr_res)['c'] ?? 0;
 
-    $is_logged  = !empty($_SESSION['user_id']);
-    $user_name  = $_SESSION['user_name'] ?? '';
-    $user_init  = $is_logged ? strtoupper(substr($user_name, 0, 2)) : '';
+    // Layer 2: PHP Backend Query - Active auctions ordered by end_time ASC
+    $auction_items_res = mysqli_query($conn, "
+        SELECT 
+            id, 
+            title, 
+            description, 
+            image, 
+            starting_bid, 
+            current_bid, 
+            city, 
+            latitude, 
+            longitude, 
+            end_time, 
+            status
+        FROM auction_items
+        WHERE status = 'active' AND end_time > NOW()
+        ORDER BY end_time ASC
+    ");
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -53,18 +73,21 @@ $sellers_res = mysqli_query($conn, "
     <meta name="description" content="Geo Auction – Discover, bid, and win on thousands of live auctions. Cars, electronics, art, collectibles and more.">
     <title>Geo Auction – Live Bidding Platform</title>
     <link rel="stylesheet" href="assets/css/main.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="assets/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <style>
-        /* Hero countdown numbers */
-        .hero-card-price { font-size: 15px; }
-        .bid-live { color: #4df08a; font-weight: 700; font-size: 12px; }
-        
-        /* Smooth scrolling for anchor links */
+
+        .hero-card-price { 
+            font-size: 15px; 
+        }
+        .bid-live { 
+            color: #4df08a; 
+            font-weight: 700; 
+            font-size: 12px; }
         html {
             scroll-behavior: smooth;
         }
 
-        /* Custom RGB(4, 120, 87) and Black combination for Buttons */
         .btn-primary, .btn-gold {
             background-color: rgb(4 120 87) !important;
             border-color: rgb(4 120 87) !important;
@@ -85,7 +108,7 @@ $sellers_res = mysqli_query($conn, "
             color: rgb(4 120 87) !important;
         }
 
-        /* Slider styles for live auction item images */
+        
         .slider-container {
             position: relative;
             overflow: hidden;
@@ -123,6 +146,7 @@ $sellers_res = mysqli_query($conn, "
     </style>
 </head>
 <body>
+<?php include_once __DIR__ . '/includes/components/loading_spinner_overlay.php'; ?>
 
 <nav class="pub-nav">
     <div class="pub-nav-inner">
@@ -144,6 +168,9 @@ $sellers_res = mysqli_query($conn, "
                 <a href="dashboard.php" class="pub-nav-user">
                     <div class="pub-nav-avatar" style="background: rgb(4 120 87); color: #fff;"><?php echo $user_init; ?></div>
                     <span class="pub-nav-user-name"><?php echo htmlspecialchars($user_name); ?></span>
+                </a>
+                <a href="logout.php" class="btn btn-outline btn-sm logout-btn" style="border-color: #ef4444; color: #ef4444; padding: 6px 10px;" title="Logout">
+                    <i class="fas fa-sign-out-alt"></i>
                 </a>
             <?php else: ?>
                 <a href="login.php" class="btn btn-outline btn-sm" style="border-color: rgb(4 120 87); color: rgb(4 120 87);">Login</a>
@@ -219,7 +246,6 @@ $sellers_res = mysqli_query($conn, "
                 else $timer_str = 'Ending soon';
                 $is_featured = ($idx === 0);
                 $item_link = $is_logged ? "item.php?id={$hi['id']}" : "login.php";
-                
                 $hi_raw_images = $hi['images'] ?? '';
                 $hi_img_list = [];
                 if (!empty($hi_raw_images)) {
@@ -257,78 +283,13 @@ $sellers_res = mysqli_query($conn, "
                 <h2 class="section-title"><span style="color: rgb(4 120 87);">Live</span> Auctions</h2>
                 <p class="section-sub">Hand-picked active items with the most bidding activity</p>
             </div>
-            <a href="#" class="section-link" style="color: rgb(4 120 87);">View all →</a>
+            <a href="items.php" class="section-link" style="color: rgb(4 120 87);">View all →</a>
         </div>
-
         <?php if ($featured_res && mysqli_num_rows($featured_res) > 0): ?>
             <?php mysqli_data_seek($featured_res, 0); ?>
-            <div class="grid-4">
-            <?php while ($item = mysqli_fetch_assoc($featured_res)):
-                $current_price = $item['max_bid'] ? $item['max_bid'] : $item['starting_price'];
-                $price    = number_format((float)$current_price, 2);
-                $diff     = $item['end_time'] ? strtotime($item['end_time']) - time() : 0;
-                if ($diff <= 0) $timer = 'Ending soon';
-                elseif ($diff < 3600) $timer = round($diff/60).'m left';
-                elseif ($diff < 86400) $timer = round($diff/3600).'h left';
-                else {
-                    $days = floor($diff / 86400);
-                    $hours = floor(($diff % 86400) / 3600);
-                    $timer = $days . ' Days ' . $hours . ' Hours';
-                }
-                $is_urgent = ($diff > 0 && $diff < 3600);
-                $card_link = $is_logged ? "item.php?id={$item['id']}" : "login.php";
-                $raw_images = $item['images'] ?? '';
-                $image_list = [];
-                if (!empty($raw_images)) {
-                    $decoded = json_decode($raw_images, true);
-                    if (is_array($decoded)) {
-                        $image_list = $decoded;
-                    } else {
-                        $image_list = array_map('trim', explode(',', $raw_images));
-                    }
-                }
-                if (empty($image_list)) {
-                    $image_list = ['assets/image/geo-auction.png'];
-                }
-            ?>
-                <div class="card item-card" style="text-decoration:none;color:inherit;">
-                    <div class="slider-container">
-                        <div class="slides" style="width: <?php echo count($image_list) * 100; ?>%;">
-                            <?php foreach ($image_list as $img_path): ?>
-                                <div class="slide-item" style="width: <?php echo 100 / count($image_list); ?>%;">
-                                    <img src="<?php echo htmlspecialchars($img_path); ?>" alt="<?php echo htmlspecialchars($item['title']); ?>">
-                                </div>
-                            <?php endforeach; ?>
-                        </div>
-                        <?php if (count($image_list) > 1): ?>
-                            <button class="slider-btn prev">&#10094;</button>
-                            <button class="slider-btn next">&#10095;</button>
-                        <?php endif; ?>
-                    </div>
-
-                    <a href="<?php echo $card_link; ?>" style="text-decoration:none;color:inherit;">
-                        <div class="item-card-body">
-                            <div class="item-card-cat"><?php echo htmlspecialchars($item['cat_name'] ?? 'General'); ?></div>
-                            <div class="item-card-title"><?php echo htmlspecialchars($item['title']); ?></div>
-                            <div class="item-card-price-row">
-                                <div class="item-card-price">Current Bid: Rs.<?php echo $price; ?></div>
-                                <div class="item-card-bids">Total Bids: <?php echo $item['bid_count']; ?></div>
-                            </div>
-                            <div class="item-card-timer <?php echo $is_urgent ? 'text-red' : ''; ?>">
-                                <i class="fas fa-clock"></i> Time Remaining: <?php echo $timer; ?>
-                            </div>
-                            <?php if(!empty($item['end_time'])): ?>
-                            <div style="font-size: 12px; color: #888; margin-top: 4px;">
-                                Expire Date: <?php echo date('d M Y, h:i A', strtotime($item['end_time'])); ?>
-                            </div>
-                            <?php endif; ?>
-                        </div>
-                        <div class="item-card-footer">
-                            <span class="badge badge-green" style="background: rgba(4, 120, 87, 0.15); color: rgb(4 120 87);"><span class="live-dot" style="background: rgb(4 120 87);"></span> Live</span>
-                            <span class="btn btn-sm btn-primary require-login" style="padding:6px 14px;font-size:12px;">Bid Now</span>
-                        </div>
-                    </a>
-                </div>
+            <div class="catalog-grid">
+            <?php while ($item = mysqli_fetch_assoc($featured_res)): ?>
+                <?php render_unified_item_card($item, $user_role, $user_id); ?>
             <?php endwhile; ?>
             </div>
         <?php else: ?>
@@ -341,7 +302,6 @@ $sellers_res = mysqli_query($conn, "
         <?php endif; ?>
     </div>
 </section>
-
 <section class="section section-alt" id="category">
     <div class="section-inner">
         <div class="section-header">
@@ -607,6 +567,54 @@ document.querySelectorAll('.card.item-card').forEach(function(card) {
     }
 });
 </script>
+
+<script>
+// Real-time Countdown Timer Updater for Auction Cards
+function updateLiveAuctionTimers() {
+    const timerElements = document.querySelectorAll('.stat-timer-val[data-end-timestamp]');
+    const now = Math.floor(Date.now() / 1000);
+    timerElements.forEach(el => {
+        const endTs = parseInt(el.getAttribute('data-end-timestamp'), 10);
+        const diff = Math.max(0, endTs - now);
+        if (diff <= 0) {
+            el.textContent = 'Ended';
+            return;
+        }
+        const d = Math.floor(diff / 86400);
+        const h = Math.floor((diff % 86400) / 3600);
+        const m = Math.floor((diff % 3600) / 60);
+        const s = diff % 60;
+        if (d > 0) {
+            el.textContent = `${d}d : ${h}h`;
+        } else if (h > 0) {
+            el.textContent = `${h}h : ${m}m : ${s}s`;
+        } else {
+            el.textContent = `${m}m : ${s}s`;
+        }
+    });
+}
+setInterval(updateLiveAuctionTimers, 1000);
+updateLiveAuctionTimers();
+
+// Intercept all logout clicks to display the loading spinner immediately
+document.addEventListener('click', function(e) {
+    const logoutLink = e.target.closest('a[href*="logout"], .logout, .logout-btn');
+    if (logoutLink && !logoutLink.hasAttribute('data-no-loader')) {
+        const targetHref = logoutLink.getAttribute('href');
+        if (targetHref && targetHref !== '#' && !targetHref.startsWith('javascript:')) {
+            e.preventDefault();
+            if (typeof showLoader === 'function') {
+                showLoader('Logging out, please wait...');
+            }
+            setTimeout(function() {
+                window.location.href = targetHref;
+            }, 250);
+        }
+    }
+});
+</script>
+
+<?php render_unified_card_assets(); ?>
 
 </body>
 </html>

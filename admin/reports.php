@@ -6,7 +6,7 @@ if (session_status() === PHP_SESSION_NONE) {
 include_once __DIR__ . '/../includes/database.php';
 include_once __DIR__ . '/../includes/auth.php';
 
-// require_admin('../index.php');
+require_admin('../index.php');
 
 $users_res    = mysqli_query($conn, "SELECT COUNT(*) AS c FROM users");
 $total_users  = mysqli_fetch_assoc($users_res)['c'] ?? 0;
@@ -334,5 +334,12 @@ $recent_bids_res = mysqli_query($conn, "
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    window.addEventListener('pageshow', function (event) {
+        if (event.persisted || (window.performance && window.performance.navigation && window.performance.navigation.type === 2)) {
+            window.location.reload();
+        }
+    });
+    </script>
 </body>
 </html>

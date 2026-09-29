@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Full-Screen Loading Spinner Overlay Demo</title>
+  
+  <style>
+    /* ==============================================================
+       1. Base Page & Theme Styles
+       ============================================================== */
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: #f1f5f9;
+      color: #1e293b;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+
+    /* ==============================================================
+       2. Full-Screen Loading Overlay Styles
+       ============================================================== */
+    .loader-overlay {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(255, 255, 255, 0.88); /* Semi-transparent white overlay */
+      backdrop-filter: blur(8px);                  /* Modern glassmorphism blur */
+      -webkit-backdrop-filter: blur(8px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 99999;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.25s ease, visibility 0.25s ease;
+      user-select: none;
+    }
+
+    /* Active State (Shown) */
+    .loader-overlay.active {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    /* Center Content Container */
+    .loader-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 2.25rem 2.5rem;
+      border-radius: 1rem;
+      background: #ffffff;
+      color: #000000;
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      box-shadow: 0 20px 45px -10px rgba(0, 0, 0, 0.14), 0 4px 16px rgba(0, 0, 0, 0.06);
+      transform: scale(0.92);
+      transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .loader-overlay.active .loader-content {
+      transform: scale(1);
+    }
+
+    /* Two-Arrow Loop Spinner Graphic */
+    .spinner-icon {
+      width: 52px;
+      height: 52px;
+      color: #000000; /* Pure black matching white theme */
+      animation: spin 0.85s linear infinite;
+    }
+
+    /* Smooth 360-degree Rotation Keyframe */
+    @keyframes spin {
+      0% {
+        transform: rotate(0deg);
+      }
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* Informational Text */
+    .loader-text {
+      margin-top: 1.15rem;
+      color: #000000;
+      font-size: 1rem;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+
+    .loader-subtext {
+      margin-top: 0.35rem;
+      color: #334155;
+      font-size: 0.825rem;
+    }
+
+    /* ==============================================================
+       3. Sample Login Form Card
+       ============================================================== */
+    .login-card {
+      background: #ffffff;
+      width: 100%;
+      max-width: 420px;
+      padding: 2.25rem;
+      border-radius: 1rem;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
+      border: 1px solid #e2e8f0;
+    }
+
+    .login-header {
+      margin-bottom: 1.75rem;
+      text-align: center;
+    }
+
+    .login-header h2 {
+      font-size: 1.5rem;
+      font-weight: 800;
+      color: #0f172a;
+      letter-spacing: -0.025em;
+    }
+
+    .login-header p {
+      font-size: 0.875rem;
+      color: #64748b;
+      margin-top: 0.25rem;
+    }
+
+    .form-group {
+      margin-bottom: 1.25rem;
+    }
+
+    .form-label {
+      display: block;
+      font-size: 0.825rem;
+      font-weight: 600;
+      color: #334155;
+      margin-bottom: 0.5rem;
+    }
+
+    .form-input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      border: 1.5px solid #cbd5e1;
+      font-size: 0.95rem;
+      color: #0f172a;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .form-input:focus {
+      border-color: #047857;
+      box-shadow: 0 0 0 3px rgba(4, 120, 87, 0.15);
+    }
+
+    .form-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      font-size: 0.85rem;
+    }
+
+    .form-checkbox {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: #475569;
+      cursor: pointer;
+    }
+
+    .forgot-link {
+      color: #047857;
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    .forgot-link:hover {
+      text-decoration: underline;
+    }
+
+    .btn-submit {
+      width: 100%;
+      padding: 0.85rem 1.5rem;
+      border-radius: 0.5rem;
+      border: none;
+      background-color: #047857;
+      color: #ffffff;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background-color 0.2s, transform 0.1s;
+    }
+
+    .btn-submit:hover {
+      background-color: #065f46;
+    }
+
+    .btn-submit:active {
+      transform: scale(0.99);
+    }
+
+    /* Feedback Banner */
+    .alert-banner {
+      display: none;
+      padding: 0.85rem 1rem;
+      border-radius: 0.5rem;
+      margin-bottom: 1.25rem;
+      font-size: 0.875rem;
+      font-weight: 500;
+    }
+
+    .alert-banner.success {
+      display: block;
+      background: #ecfdf5;
+      color: #065f46;
+      border: 1px solid #a7f3d0;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ==============================================================
+       FULL-SCREEN LOADING SPINNER OVERLAY
+       ============================================================== -->
+  <div id="fullScreenLoader" class="loader-overlay" role="status" aria-live="polite" aria-hidden="true">
+    <div class="loader-content">
+      <!-- Clean Circular Two-Arrow Loop SVG Spinner -->
+      <svg class="spinner-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <!-- Top Arrow & Arc -->
+        <polyline points="23 4 23 10 17 10"></polyline>
+        <!-- Bottom Arrow & Arc -->
+        <polyline points="1 20 1 14 7 14"></polyline>
+        <!-- Circular Loop Paths -->
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+      </svg>
+      <div id="loaderMessage" class="loader-text">Authenticating...</div>
+      <div class="loader-subtext">Please wait a moment</div>
+    </div>
+  </div>
+
+  <!-- ==============================================================
+       SAMPLE LOGIN FORM (FOR TESTING)
+       ============================================================== -->
+  <div class="login-card">
+    <div class="login-header">
+      <h2>Welcome Back</h2>
+      <p>Sign in to your auction account</p>
+    </div>
+
+    <!-- Dynamic Feedback Banner -->
+    <div id="loginFeedback" class="alert-banner"></div>
+
+    <form id="sampleLoginForm" novalidate>
+      <div class="form-group">
+        <label for="loginEmail" class="form-label">Email Address</label>
+        <input type="email" id="loginEmail" class="form-input" placeholder="user@example.com" value="admin@geoauction.com" required autocomplete="email">
+      </div>
+
+      <div class="form-group">
+        <label for="loginPassword" class="form-label">Password</label>
+        <input type="password" id="loginPassword" class="form-input" placeholder="Enter your password" value="Password@123" required autocomplete="current-password">
+      </div>
+
+      <div class="form-row">
+        <label class="form-checkbox">
+          <input type="checkbox" id="rememberMe" checked>
+          <span>Remember me</span>
+        </label>
+        <a href="#" class="forgot-link">Forgot password?</a>
+      </div>
+
+      <button type="submit" id="loginBtn" class="btn-submit">
+        Sign In
+      </button>
+    </form>
+  </div>
+
+  <!-- ==============================================================
+       JAVASCRIPT INTEGRATION & LOADER CONTROLLER
+       ============================================================== -->
+  <script>
+    /**
+     * Display the full-screen loading spinner overlay
+     * @param {string} [message="Authenticating..."] Optional custom status message
+     */
+    function showLoader(message = 'Authenticating...') {
+      const loader = document.getElementById('fullScreenLoader');
+      const msgEl = document.getElementById('loaderMessage');
+      
+      if (loader) {
+        if (msgEl) msgEl.textContent = message;
+        loader.classList.add('active');
+        loader.setAttribute('aria-hidden', 'false');
+        document.body.style.overflow = 'hidden'; // Prevent background scrolling
+      }
+    }
+
+    /**
+     * Hide the full-screen loading spinner overlay
+     */
+    function hideLoader() {
+      const loader = document.getElementById('fullScreenLoader');
+      if (loader) {
+        loader.classList.remove('active');
+        loader.setAttribute('aria-hidden', 'true');
+        document.body.style.overflow = ''; // Restore background scrolling
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Wire up to the Sample Login Form
+    // -------------------------------------------------------------
+    document.addEventListener('DOMContentLoaded', function () {
+      const loginForm = document.getElementById('sampleLoginForm');
+      const feedback = document.getElementById('loginFeedback');
+
+      if (loginForm) {
+        loginForm.addEventListener('submit', function (e) {
+          e.preventDefault(); // Prevent full page reload
+
+          const emailInput = document.getElementById('loginEmail');
+          const passwordInput = document.getElementById('loginPassword');
+
+          if (!emailInput.value || !passwordInput.value) {
+            alert('Please fill in both email and password.');
+            return;
+          }
+
+          // 1. Show the full-screen loader with custom message
+          showLoader('Signing in securely...');
+          feedback.className = 'alert-banner';
+          feedback.textContent = '';
+
+          // 2. Simulate authentication request (e.g. 2-second API response time)
+          setTimeout(function () {
+            // 3. Hide the loader upon completion
+            hideLoader();
+
+            // Display success feedback
+            feedback.className = 'alert-banner success';
+            feedback.textContent = '✓ Login successful! Redirecting to your dashboard...';
+
+            console.log('Authentication simulated successfully for:', emailInput.value);
+          }, 2000);
+        });
+      }
+    });
+  </script>
+</body>
+</html>

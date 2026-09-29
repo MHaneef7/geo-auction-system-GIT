@@ -19,7 +19,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif (strlen($password) < 6) {
             $error = "Password must be at least 6 characters long.";
         } else {
-            $sql = "SELECT id FROM users WHERE reset_token = '$token' AND reset_expires > NOW() LIMIT 1";
+            $sql = "SELECT id FROM users WHERE reset_token = '$token' AND reset_token_expires_at > NOW() LIMIT 1";
             $res = mysqli_query($conn, $sql);
 
             if ($res && mysqli_num_rows($res) > 0) {
@@ -28,10 +28,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $hashed_password = password_hash($password, PASSWORD_DEFAULT);
                 $hashed_escaped  = mysqli_real_escape_string($conn, $hashed_password);
 
-                $update_sql = "UPDATE users SET password = '$hashed_escaped', reset_token = NULL, reset_expires = NULL WHERE id = $user_id";
+                $update_sql = "UPDATE users SET password = '$hashed_escaped', reset_token = NULL, reset_token_expires_at = NULL WHERE id = $user_id";
                 mysqli_query($conn, $update_sql);
 
-                $success = "Password successfully reset! You can now <a href='index.php'>login here</a>.";
+                $success = "Password successfully reset! You can now <a href='login.php'>login here</a>.";
             } else {
                 $error = "Invalid or expired reset token.";
             }

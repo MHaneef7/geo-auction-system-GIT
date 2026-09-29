@@ -6,6 +6,8 @@ if (session_status() === PHP_SESSION_NONE) {
 include_once __DIR__ . '/../includes/database.php';
 include_once __DIR__ . '/../includes/auth.php';
 
+require_admin('../index.php');
+
 // Filter by item
 $item_filter = isset($_GET['item_id']) ? (int)$_GET['item_id'] : 0;
 $search      = isset($_GET['search']) ? mysqli_real_escape_string($conn, trim($_GET['search'])) : '';
@@ -208,5 +210,12 @@ $total_amount = mysqli_fetch_assoc($total_amount_res)['s'] ?? 0;
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    window.addEventListener('pageshow', function (event) {
+        if (event.persisted || (window.performance && window.performance.navigation && window.performance.navigation.type === 2)) {
+            window.location.reload();
+        }
+    });
+    </script>
 </body>
 </html>

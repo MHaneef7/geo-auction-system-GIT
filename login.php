@@ -14,6 +14,11 @@ $alert_type = '';
 $alert_msg  = '';
 $email_val  = '';
 
+if (isset($_GET['logout'])) {
+    $alert_type = 'success';
+    $alert_msg  = 'You have been successfully logged out.';
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $email     = trim($_POST['email'] ?? '');
     $password  = trim($_POST['password'] ?? '');
@@ -34,10 +39,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 
                 if ($status == 1 || $status === 'active') {
 
-                    $_SESSION['user_id'] = $user['id'];
-                    $_SESSION['role']    = strtolower($user['role'] ?? 'user');
-                    $_SESSION['name']    = $user['name'];
-                    $_SESSION['email']   = $user['email'];
+                    $user_role = strtolower(trim($user['role'] ?? 'buyer'));
+
+                    $_SESSION['user_id']   = (int)$user['id'];
+                    $_SESSION['id']        = (int)$user['id'];
+                    $_SESSION['role']      = $user_role;
+                    $_SESSION['user_role'] = $user_role;
+                    $_SESSION['name']      = $user['name'];
+                    $_SESSION['email']     = $user['email'];
                     
                     $_SESSION['user_name']   = $user['name'];
                     $_SESSION['user_email']  = $user['email'];
@@ -45,10 +54,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $_SESSION['user_avatar'] = $user['avatar'] ?? '';
                     $_SESSION['user_bio']    = $user['bio'] ?? '';
                     $_SESSION['user_gender'] = $user['gender'] ?? '';
-                    $_SESSION['id']          = $user['id']; // Purani compatibility ke liye
 
-                    // Seedha user/dashboard.php par redirect karein
-                    $redirect = isset($_POST['redirect']) && !empty($_POST['redirect']) ? $_POST['redirect'] : 'user/dashboard.php';
+                    // If user is admin, set administrative sessions
+                    if ($user_role === 'admin') {
+                        $_SESSION['admin_logged_in'] = true;
+                        $_SESSION['admin_id']        = (int)$user['id'];
+                        $_SESSION['admin_name']      = $user['name'];
+                        $_SESSION['admin_email']     = $user['email'];
+                    }
+
+                    // Smart Redirection: Admins go to admin/dashboard.php unless an explicit redirect was requested
+                    if ($user_role === 'admin' && empty($_POST['redirect'])) {
+                        $redirect = 'admin/dashboard.php';
+                    } else {
+                        $redirect = isset($_POST['redirect']) && !empty($_POST['redirect']) ? $_POST['redirect'] : 'user/dashboard.php';
+                    }
                     header("Location: " . $redirect);
                     exit();
                 } else {
@@ -102,9 +122,146 @@ $redirect_param = isset($_GET['redirect']) ? htmlspecialchars($_GET['redirect'])
             padding-left: 42px !important;
             padding-right: 44px;
         }
+
+        /* Interactive Popup Modal */
+        .popup-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            z-index: 99999;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.25s;
+        }
+        .popup-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        .popup-card {
+            width: 100%;
+            max-width: 400px;
+            background: #ffffff;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            border-radius: 20px;
+            padding: 32px 28px 24px 28px;
+            text-align: center;
+            position: relative;
+            box-shadow: 0 20px 45px -10px rgba(0, 0, 0, 0.25);
+            transform: scale(0.9) translateY(12px);
+            transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .popup-overlay.active .popup-card {
+            transform: scale(1) translateY(0);
+        }
+        .popup-close-btn {
+            position: absolute;
+            top: 14px;
+            right: 14px;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: #f1f5f9;
+            border: none;
+            color: #64748b;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .popup-close-btn:hover {
+            background: #e2e8f0;
+            color: #0f172a;
+            transform: rotate(90deg);
+        }
+        .popup-icon-ring {
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            margin: 0 auto 16px auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+        }
+        .popup-type-error .popup-icon-ring {
+            background: #fef2f2;
+            color: #dc2626;
+            border: 2px solid #fecaca;
+        }
+        .popup-type-success .popup-icon-ring {
+            background: #ecfdf5;
+            color: #059669;
+            border: 2px solid #a7f3d0;
+        }
+        .popup-title {
+            color: #0f172a;
+            font-size: 19px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .popup-desc {
+            color: #475569;
+            font-size: 14px;
+            line-height: 1.5;
+            margin-bottom: 22px;
+        }
+        .popup-btn {
+            width: 100%;
+            padding: 12px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 700;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .popup-type-error .popup-btn {
+            background: #dc2626;
+            color: #fff;
+        }
+        .popup-type-error .popup-btn:hover {
+            background: #b91c1c;
+        }
+        .popup-type-success .popup-btn {
+            background: var(--green);
+            color: #fff;
+        }
+        .popup-type-success .popup-btn:hover {
+            filter: brightness(0.92);
+        }
     </style>
 </head>
 <body>
+
+<!-- Interactive Popup Modal (Replaces Static Alert) -->
+<div id="loginPopupModal" class="popup-overlay <?php echo !empty($alert_msg) ? 'active' : ''; ?>" onclick="if(event.target === this) closeLoginPopup()">
+    <div class="popup-card <?php echo $alert_type === 'success' ? 'popup-type-success' : 'popup-type-error'; ?>">
+        <button type="button" class="popup-close-btn" onclick="closeLoginPopup()" aria-label="Close popup">
+            <i class="fas fa-times"></i>
+        </button>
+        <div class="popup-icon-ring">
+            <i class="fas <?php echo $alert_type === 'success' ? 'fa-check' : 'fa-circle-exclamation'; ?>"></i>
+        </div>
+        <h4 class="popup-title">
+            <?php echo $alert_type === 'success' ? 'Success' : 'Notice'; ?>
+        </h4>
+        <p class="popup-desc">
+            <?php echo htmlspecialchars($alert_msg); ?>
+        </p>
+        <button type="button" class="popup-btn" id="loginPopupBtn" onclick="closeLoginPopup()">
+            <?php echo $alert_type === 'success' ? 'Continue' : 'Okay, Got It'; ?>
+        </button>
+    </div>
+</div>
+
 <div class="auth-page">
 
     <!-- ── LEFT: Brand Panel ── -->
@@ -156,12 +313,7 @@ $redirect_param = isset($_GET['redirect']) ? htmlspecialchars($_GET['redirect'])
             <p>Sign in to your Geo Auction account to continue</p>
         </div>
 
-        <?php if (!empty($alert_msg)): ?>
-        <div class="alert alert-<?php echo $alert_type === 'error' ? 'error' : 'success'; ?>">
-            <i class="fas fa-<?php echo $alert_type === 'error' ? 'circle-xmark' : 'circle-check'; ?>"></i>
-            <?php echo htmlspecialchars($alert_msg); ?>
-        </div>
-        <?php endif; ?>
+        <!-- Alert is now displayed exclusively via the Interactive Popup Modal above -->
 
         <form method="POST" action="" id="loginForm">
             <input type="hidden" name="redirect" value="<?php echo htmlspecialchars($redirect_param); ?>">
@@ -218,10 +370,32 @@ $redirect_param = isset($_GET['redirect']) ? htmlspecialchars($_GET['redirect'])
 </div>
 
 <script>
+function closeLoginPopup() {
+    var modal = document.getElementById('loginPopupModal');
+    if (modal) {
+        modal.classList.remove('active');
+    }
+}
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closeLoginPopup();
+    }
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+    var modal = document.getElementById('loginPopupModal');
+    if (modal && modal.classList.contains('active')) {
+        var btn = document.getElementById('loginPopupBtn');
+        if (btn) btn.focus();
+    }
+});
+
 function togglePwd() {
     var input = document.getElementById('password');
     var icon  = document.getElementById('eyeIcon');
     if (input.type === 'password') {
+        pwdInput = input;
         input.type = 'text';
         icon.className = 'fas fa-eye-slash';
     } else {
@@ -234,7 +408,11 @@ document.getElementById('loginForm').addEventListener('submit', function() {
     var btn = document.getElementById('loginBtn');
     btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Signing in...';
     btn.disabled = true;
+    if (typeof showLoader === 'function') {
+        showLoader('Authenticating, please wait...');
+    }
 });
 </script>
+<?php include_once __DIR__ . '/includes/components/loading_spinner_overlay.php'; ?>
 </body>
 </html>

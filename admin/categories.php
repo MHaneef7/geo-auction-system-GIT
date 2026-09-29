@@ -6,6 +6,8 @@ if (session_status() === PHP_SESSION_NONE) {
 include_once __DIR__ .'/../includes/database.php';
 include_once __DIR__ . '/../includes/auth.php';
 
+require_admin('../index.php');
+
 $msg = '';
 
 // Handle add / edit / delete
@@ -235,5 +237,12 @@ if (isset($_GET['edit'])) {
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    window.addEventListener('pageshow', function (event) {
+        if (event.persisted || (window.performance && window.performance.navigation && window.performance.navigation.type === 2)) {
+            window.location.reload();
+        }
+    });
+    </script>
 </body>
 </html>

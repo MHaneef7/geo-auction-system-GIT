@@ -1,69 +1,190 @@
 <?php
-    ini_set('display_errors', 1);
-    ini_set('display_startup_errors', 1);
-    error_reporting(E_ALL);
-            if (session_status() === PHP_SESSION_NONE) {
-                session_start();
-            }
-                if (isset($_GET['switch_role']) && in_array(strtolower($_GET['switch_role']), ['buyer', 'seller', 'admin'])) {
-                    $_SESSION['role'] = strtolower($_GET['switch_role']);
+ini_set('display_errors', 0);
+error_reporting(E_ALL);
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Role switching
+if (isset($_GET['switch_role']) && in_array(strtolower($_GET['switch_role']), ['buyer', 'seller', 'admin'])) {
+    $_SESSION['role'] = strtolower($_GET['switch_role']);
+}
+
+$is_authenticated = isset($_SESSION['user_id']) && !empty($_SESSION['user_id']);
+$user_id = $is_authenticated ? (int)$_SESSION['user_id'] : 0;
+$role = $is_authenticated ? strtolower(trim($_SESSION['role'] ?? 'buyer')) : 'guest';
+$is_ajax = isset($_GET['ajax']) && $_GET['ajax'] == '1';
+
+// Prevent legacy header from forcing login on public live auction page
+$require_auth = false;
+$header_included = false;
+if (!$is_ajax) {
+    if (file_exists(__DIR__ . '/../includes/header.php')) {
+        include_once __DIR__ . '/../includes/header.php';
+        $header_included = true;
+    } elseif (file_exists(__DIR__ . '/includes/header.php')) {
+        include_once __DIR__ . '/includes/header.php';
+        $header_included = true;
+    }
+}
+
+if (file_exists(__DIR__ . '/../includes/database.php')) {
+    include_once __DIR__ . '/../includes/database.php';
+} elseif (file_exists(__DIR__ . '/includes/database.php')) {
+    include_once __DIR__ . '/includes/database.php';
+}
+
+$has_db = isset($conn) && $conn instanceof mysqli && !$conn->connect_error;
+$user_lat = isset($_SESSION['user_lat']) && is_numeric($_SESSION['user_lat']) ? (float)$_SESSION['user_lat'] : 25.3960;
+$user_lng = isset($_SESSION['user_lng']) && is_numeric($_SESSION['user_lng']) ? (float)$_SESSION['user_lng'] : 68.3578;
+
+// Ensure auto_bids table exists and clean any legacy empty statuses
+if ($has_db) {
+    @$conn->query("
+        CREATE TABLE IF NOT EXISTS `auto_bids` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `item_id` INT NOT NULL,
+            `user_id` INT NOT NULL,
+            `max_bid_amount` DECIMAL(12,2) NOT NULL,
+            `is_active` TINYINT(1) NOT NULL DEFAULT 1,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY `uk_item_user` (`item_id`, `user_id`),
+            INDEX `idx_item_active` (`item_id`, `is_active`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+    @$conn->query("UPDATE items SET status = 'ended' WHERE status = '' OR status IS NULL");
+}
+
+/**
+ * Great-circle distance calculation via Haversine formula
+ */
+function getDistanceKm($lat1, $lon1, $lat2, $lon2) {
+    if (empty($lat1) || empty($lon1) || empty($lat2) || empty($lon2)) return null;
+    $lat1 = (float)$lat1; $lon1 = (float)$lon1; $lat2 = (float)$lat2; $lon2 = (float)$lon2;
+    if ($lat1 == 0.0 && $lon1 == 0.0) return null;
+    if ($lat2 == 0.0 && $lon2 == 0.0) return null;
+
+    $earthRadius = 6371; // km
+    $dLat = deg2rad($lat2 - $lat1);
+    $dLon = deg2rad($lon2 - $lon1);
+    $a = sin($dLat / 2) * sin($dLat / 2) +
+         cos(deg2rad($lat1)) * cos(deg2rad($lat2)) *
+         sin($dLon / 2) * sin($dLon / 2);
+    $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+    return round($earthRadius * $c, 1);
+}
+
+/**
+ * Image path cleaner
+ */
+function cleanImagePath($path) {
+    if (empty($path)) return '';
+    $path = trim((string)$path, " \t\n\r\0\x0B\"'[]\\");
+    $path = str_replace(['\\/', '//'], '/', $path);
+    $path = trim($path);
+    if (empty($path)) return '';
+    if (preg_match('/^(https?:\/\/|\/\/|data:)/i', $path)) {
+        return $path;
+    }
+    $is_user_sub = (basename(dirname(__FILE__)) === 'user');
+    if ($is_user_sub) {
+        if (strpos($path, '../') === 0) {
+            return $path;
+        }
+        if (strpos($path, 'uploads/') === 0 || strpos($path, 'assets/') === 0) {
+            return '../' . $path;
+        }
+    }
+    return $path;
+}
+
+/**
+ * Robust Item Image Parser (Checks item_images table, featured_image, items.images JSON/CSV)
+ */
+function parseItemImages($conn, $item_id = 0, $imgField = '', $featuredField = '') {
+    $images = [];
+    if (!empty($featuredField)) {
+        $cleaned = cleanImagePath($featuredField);
+        if (!empty($cleaned) && !in_array($cleaned, $images)) $images[] = $cleaned;
+    }
+    if ($conn instanceof mysqli && $item_id > 0) {
+        try {
+            $stmt = mysqli_prepare($conn, "SELECT image_path FROM item_images WHERE item_id = ? ORDER BY is_primary DESC, sort_order ASC, id ASC");
+            if ($stmt) {
+                mysqli_stmt_bind_param($stmt, "i", $item_id);
+                mysqli_stmt_execute($stmt);
+                $res = mysqli_stmt_get_result($stmt);
+                while ($r = mysqli_fetch_assoc($res)) {
+                    $cleaned = cleanImagePath($r['image_path'] ?? '');
+                    if (!empty($cleaned) && !in_array($cleaned, $images)) $images[] = $cleaned;
                 }
-                $is_authenticated = isset($_SESSION['user_id']) && !empty($_SESSION['user_id']);
-                $user_id = $is_authenticated ? (int)$_SESSION['user_id'] : 0;
-                $role = $is_authenticated ? strtolower(trim($_SESSION['role'] ?? 'buyer')) : 'guest';
-                $header_included = false;
-            if (file_exists(__DIR__ . '/../includes/header.php')) {
-                include_once __DIR__ . '/../includes/header.php';
-                    $header_included = true;
-            } elseif (file_exists(__DIR__ . '/includes/header.php')) {
-                include_once __DIR__ . '/includes/header.php';
-                    $header_included = true;
+                mysqli_stmt_close($stmt);
             }
-            if (file_exists(__DIR__ . '/../includes/database.php')) {
-                include_once __DIR__ . '/../includes/database.php';
-            } elseif (file_exists(__DIR__ . '/includes/database.php')) {
-                include_once __DIR__ . '/includes/database.php';
+        } catch (Exception $e) {}
+    }
+    if (!empty($imgField)) {
+        $raw = trim((string)$imgField);
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            foreach ($decoded as $p) {
+                $val = is_string($p) ? cleanImagePath($p) : (is_array($p) ? cleanImagePath($p['image_path'] ?? $p['url'] ?? '') : '');
+                if (!empty($val) && !in_array($val, $images)) $images[] = $val;
             }
-            $has_db = isset($conn) && $conn instanceof mysqli && !$conn->connect_error;
-            $user_lat = isset($_SESSION['user_lat']) ? (float)$_SESSION['user_lat'] : 25.3960;
-            $user_lng = isset($_SESSION['user_lng']) ? (float)$_SESSION['user_lng'] : 68.3578;
-                function getDistanceKm ( $lat1, $lon1, $lat2, $lon2) {
-                    if (empty($lat1) || empty($lon1) || empty($lat2) || empty($lon2)) return null;
-                    $earthRadius = 6371;
-                    $dLat = deg2rad($lat2 - $lat1);
-                    $dLon = deg2rad($lon2 - $lon1);
-                    $a = sin($dLat / 2) * sin($dLat / 2) +
-                        cos(deg2rad($lat1)) * cos(deg2rad($lat2)) *
-                        sin($dLon / 2) * sin($dLon / 2);
-                    $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
-                    return round($earthRadius * $c, 1);
-                }
-                function sendNotification($conn, $to_user, $type, $title, $msg, $link = '') {
-                    if (!$conn || $to_user <= 0) return;
-                    $stmt = mysqli_prepare($conn, "INSERT INTO user_notifications (`user_id`, `type`, `title`, `message`, `link`, `is_read`, `created_at`) VALUES (?, ?, ?, ?, ?, 0, NOW())");
-                    if (!$stmt) {
-                        $stmt = mysqli_prepare($conn, "INSERT INTO notifications (`user_id`, `type`, `title`, `message`, `link`, `is_read`, `created_at`) VALUES (?, ?, ?, ?, ?, 0, NOW())");
-                    }
-                    if ($stmt) {
-                        mysqli_stmt_bind_param($stmt, "issss", $to_user, $type, $title, $msg, $link);
-                        mysqli_stmt_execute($stmt);
-                    }
-                }
-        function runAutoBids($conn, $item_id, $current_highest, $exclude_uid = 0) {
-            if (!$conn) return;
-            $stmt = mysqli_prepare($conn, "
-                SELECT ab.id, ab.user_id, ab.max_bid_amount, u.name AS bidder_name, i.min_increment, i.seller_id
-                FROM auto_bids ab
-                JOIN items i ON ab.item_id = i.id
-                JOIN users u ON ab.user_id = u.id
-                WHERE ab.item_id = ? AND ab.is_active = 1 AND ab.user_id != ? AND ab.user_id != i.seller_id
-                ORDER BY ab.max_bid_amount DESC, ab.created_at ASC
-                LIMIT 1
-            ");
-            if (!$stmt) return;
-            mysqli_stmt_bind_param($stmt, "ii", $item_id, $exclude_uid);
+        } else {
+            $parts = explode(',', $raw);
+            foreach ($parts as $p) {
+                $val = cleanImagePath($p);
+                if (!empty($val) && !in_array($val, $images)) $images[] = $val;
+            }
+        }
+    }
+    if (empty($images)) {
+        $images[] = 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=800&q=80';
+    }
+    return $images;
+}
+
+/**
+ * Send in-app notification
+ */
+function sendNotification($conn, $to_user, $type, $title, $msg, $link = '') {
+    if (!$conn || $to_user <= 0) return;
+    try {
+        $stmt = mysqli_prepare($conn, "INSERT INTO user_notifications (`user_id`, `type`, `title`, `message`, `link`, `is_read`, `created_at`) VALUES (?, ?, ?, ?, ?, 0, NOW())");
+        if (!$stmt) {
+            $stmt = mysqli_prepare($conn, "INSERT INTO notifications (`user_id`, `type`, `title`, `message`, `link`, `is_read`, `created_at`) VALUES (?, ?, ?, ?, ?, 0, NOW())");
+        }
+        if ($stmt) {
+            mysqli_stmt_bind_param($stmt, "issss", $to_user, $type, $title, $msg, $link);
             mysqli_stmt_execute($stmt);
-            $res = mysqli_stmt_get_result($stmt);
+            mysqli_stmt_close($stmt);
+        }
+    } catch (Exception $e) {
+        error_log("Failed to send notification: " . $e->getMessage());
+    }
+}
+
+/**
+ * Multi-Agent Auto-Bid (Bidbot) Escalation Engine
+ */
+function runAutoBids($conn, $item_id, $current_highest, $exclude_uid = 0) {
+    if (!$conn || $item_id <= 0) return;
+
+    $stmt = mysqli_prepare($conn, "
+        SELECT ab.id, ab.user_id, ab.max_bid_amount, u.name AS bidder_name, u.email AS bidder_email, i.min_increment, i.seller_id
+        FROM auto_bids ab
+        JOIN items i ON ab.item_id = i.id
+        JOIN users u ON ab.user_id = u.id
+        WHERE ab.item_id = ? AND ab.is_active = 1 AND ab.user_id != ? AND ab.user_id != i.seller_id
+        ORDER BY ab.max_bid_amount DESC, ab.created_at ASC
+        LIMIT 1
+    ");
+    if (!$stmt) return;
+    mysqli_stmt_bind_param($stmt, "ii", $item_id, $exclude_uid);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
 
     if ($auto = mysqli_fetch_assoc($res)) {
         $min_inc = (float)($auto['min_increment'] > 0 ? $auto['min_increment'] : 100.00);
@@ -71,31 +192,40 @@
         $max_bid = (float)$auto['max_bid_amount'];
 
         if ($next_bid <= $max_bid) {
-            $insert_bid = mysqli_prepare($conn, "INSERT INTO bids (item_id, user_id, bidder_name, bid_amount, bid_status, created_at, status) VALUES (?, ?, ?, ?, 'active', NOW(), 'active')");
+            $insert_bid = mysqli_prepare($conn, "INSERT INTO bids (item_id, user_id, bidder_name, bidder_email, bid_amount, bid_status, created_at, status) VALUES (?, ?, ?, ?, ?, 'active', NOW(), 'active')");
             $b_name = $auto['bidder_name'] . ' (AutoBid)';
-            mysqli_stmt_bind_param($insert_bid, "iisd", $item_id, $auto['user_id'], $b_name, $next_bid);
+            $b_email = $auto['bidder_email'] ?? '';
+            mysqli_stmt_bind_param($insert_bid, "iissd", $item_id, $auto['user_id'], $b_name, $b_email, $next_bid);
             if (mysqli_stmt_execute($insert_bid)) {
                 $up_item = mysqli_prepare($conn, "UPDATE items SET current_price = ?, bid_count = bid_count + 1 WHERE id = ?");
                 mysqli_stmt_bind_param($up_item, "di", $next_bid, $item_id);
                 mysqli_stmt_execute($up_item);
                 sendNotification($conn, $auto['seller_id'], 'bid', 'Auto-Bid Received', "Auto-bid of Rs. " . number_format($next_bid, 2) . " placed on your lot.", "live_auction.php?id=$item_id");
             }
+            mysqli_stmt_close($insert_bid);
         } else {
             $deact = mysqli_prepare($conn, "UPDATE auto_bids SET is_active = 0 WHERE id = ?");
             mysqli_stmt_bind_param($deact, "i", $auto['id']);
             mysqli_stmt_execute($deact);
+            mysqli_stmt_close($deact);
             sendNotification($conn, $auto['user_id'], 'outbid', 'Auto-Bid Exceeded', "Your auto-bid limit of Rs. " . number_format($max_bid, 2) . " was exceeded.", "live_auction.php?id=$item_id");
         }
     }
+    mysqli_stmt_close($stmt);
 }
+
+// --------------------------------------------------------------------------
+// AJAX Handlers
+// --------------------------------------------------------------------------
 if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
-    header('Content-Type: application/json');
+    header('Content-Type: application/json; charset=utf-8');
     $action = $_POST['action'] ?? $_GET['action'] ?? '';
 
+    // 1. Poll Status
     if ($action === 'poll_status') {
         $poll_id = (int)($_GET['item_id'] ?? 0);
         if (!$has_db || $poll_id <= 0) {
-            echo json_encode(['success' => false, 'error' => 'Invalid ID']);
+            echo json_encode(['success' => false, 'error' => 'Invalid lot ID']);
             exit();
         }
 
@@ -107,6 +237,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         mysqli_stmt_bind_param($stmt, "i", $poll_id);
         mysqli_stmt_execute($stmt);
         $item = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+        mysqli_stmt_close($stmt);
 
         if (!$item) {
             echo json_encode(['success' => false, 'error' => 'Item not found']);
@@ -114,9 +245,13 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         }
 
         $now = time();
-        $end_ts = strtotime($item['end_time']);
+        $effective_end = (!empty($item['extended_time']) && $item['extended_time'] != '0000-00-00 00:00:00' && strtotime($item['extended_time']) > strtotime($item['end_time']))
+            ? $item['extended_time']
+            : $item['end_time'];
+        $end_ts = strtotime($effective_end);
         $is_closed = ($item['status'] !== 'active') || ($now >= $end_ts);
 
+        // Auto finalize on timer expiration
         if ($is_closed && $item['status'] === 'active') {
             $reserve = (float)($item['reserve_price'] ?? 0);
             $h_stmt = mysqli_prepare($conn, "SELECT id, user_id, bid_amount FROM bids WHERE item_id = ? ORDER BY bid_amount DESC LIMIT 1");
@@ -125,20 +260,24 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             $h_res = mysqli_stmt_get_result($h_stmt);
             if ($top_bid = mysqli_fetch_assoc($h_res)) {
                 if ($reserve <= 0 || (float)$top_bid['bid_amount'] >= $reserve) {
-                    $fin_stmt = mysqli_prepare($conn, "UPDATE items SET status = 'completed', winner_id = ?, winning_bid_id = ? WHERE id = ?");
+                    $fin_stmt = mysqli_prepare($conn, "UPDATE items SET status = 'sold', winner_id = ?, winning_bid_id = ? WHERE id = ?");
                     mysqli_stmt_bind_param($fin_stmt, "iii", $top_bid['user_id'], $top_bid['id'], $poll_id);
                     mysqli_stmt_execute($fin_stmt);
+                    mysqli_stmt_close($fin_stmt);
                     sendNotification($conn, $top_bid['user_id'], 'won', 'You Won the Auction!', "Congratulations! You won lot #$poll_id with Rs. " . number_format($top_bid['bid_amount'], 2), "live_auction.php?id=$poll_id");
                 } else {
-                    $fin_stmt = mysqli_prepare($conn, "UPDATE items SET status = 'closed' WHERE id = ?");
+                    $fin_stmt = mysqli_prepare($conn, "UPDATE items SET status = 'ended' WHERE id = ?");
                     mysqli_stmt_bind_param($fin_stmt, "i", $poll_id);
                     mysqli_stmt_execute($fin_stmt);
+                    mysqli_stmt_close($fin_stmt);
                 }
             } else {
-                $fin_stmt = mysqli_prepare($conn, "UPDATE items SET status = 'closed' WHERE id = ?");
+                $fin_stmt = mysqli_prepare($conn, "UPDATE items SET status = 'ended' WHERE id = ?");
                 mysqli_stmt_bind_param($fin_stmt, "i", $poll_id);
                 mysqli_stmt_execute($fin_stmt);
+                mysqli_stmt_close($fin_stmt);
             }
+            mysqli_stmt_close($h_stmt);
         }
 
         $b_stmt = mysqli_prepare($conn, "
@@ -162,11 +301,12 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
                 'initial' => strtoupper(substr($b_row['bidder_name'] ?? 'B', 0, 1))
             ];
         }
+        mysqli_stmt_close($b_stmt);
 
         $curr_price = max((float)$item['current_price'], (float)$item['starting_price']);
         $min_inc = (float)($item['min_increment'] > 0 ? $item['min_increment'] : 100.00);
         $next_min = $curr_price + $min_inc;
-        $reserve_met = ($item['reserve_price'] <= 0 || $curr_price >= (float)$item['reserve_price']);
+        $reserve_met = (empty($item['reserve_price']) || $curr_price >= (float)$item['reserve_price']);
 
         echo json_encode([
             'success' => true,
@@ -177,7 +317,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             'raw_next_min' => $next_min,
             'bid_count' => (int)$item['bid_count'],
             'watcher_count' => (int)$item['watcher_count'],
-            'end_time' => $item['end_time'],
+            'end_time' => $effective_end,
             'is_closed' => $is_closed,
             'reserve_met' => $reserve_met,
             'history' => $history
@@ -185,6 +325,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         exit();
     }
 
+    // 2. Place Bid
     if ($action === 'ajax_place_bid') {
         if (!$is_authenticated) {
             echo json_encode(['success' => false, 'error' => 'Please sign in to place a bid.', 'redirect' => 'login.php']);
@@ -199,16 +340,21 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
 
         mysqli_begin_transaction($conn);
         try {
-            $stmt = mysqli_prepare($conn, "SELECT current_price, starting_price, min_increment, reserve_price, status, start_time, end_time, seller_id FROM items WHERE id = ? FOR UPDATE");
+            $stmt = mysqli_prepare($conn, "SELECT current_price, starting_price, min_increment, reserve_price, status, start_time, end_time, extended_time, seller_id FROM items WHERE id = ? FOR UPDATE");
             mysqli_stmt_bind_param($stmt, "i", $b_item_id);
             mysqli_stmt_execute($stmt);
             $item_data = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+            mysqli_stmt_close($stmt);
 
             if (!$item_data) throw new Exception("Lot item not found.");
             if ((int)$item_data['seller_id'] === $user_id) throw new Exception("Sellers are not permitted to bid on their own listings.");
             
             $now = time();
-            $end_ts = strtotime($item_data['end_time']);
+            $effective_end = (!empty($item_data['extended_time']) && $item_data['extended_time'] != '0000-00-00 00:00:00' && strtotime($item_data['extended_time']) > strtotime($item_data['end_time']))
+                ? $item_data['extended_time']
+                : $item_data['end_time'];
+            $end_ts = strtotime($effective_end);
+
             if ($item_data['status'] !== 'active' || $now > $end_ts) {
                 throw new Exception("This auction is closed or has expired.");
             }
@@ -219,9 +365,10 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             $last_bid_res = mysqli_stmt_get_result($last_bid_stmt);
             if ($last_row = mysqli_fetch_assoc($last_bid_res)) {
                 if ((int)$last_row['user_id'] === $user_id) {
-                    throw new Exception("You are already the highest bidder on this item.");
+                    throw new Exception("You are already the highest bidder on this lot.");
                 }
             }
+            mysqli_stmt_close($last_bid_stmt);
 
             $base_price = max((float)$item_data['current_price'], (float)$item_data['starting_price']);
             $min_inc = (float)($item_data['min_increment'] > 0 ? $item_data['min_increment'] : 100.00);
@@ -235,6 +382,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             mysqli_stmt_bind_param($u_stmt, "i", $user_id);
             mysqli_stmt_execute($u_stmt);
             $u_row = mysqli_fetch_assoc(mysqli_stmt_get_result($u_stmt));
+            mysqli_stmt_close($u_stmt);
+
             $u_name = $u_row['name'] ?? ($_SESSION['name'] ?? 'Buyer');
             $u_email = $u_row['email'] ?? ($_SESSION['email'] ?? '');
             $ip_addr = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
@@ -243,19 +392,25 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             $ins_bid = mysqli_prepare($conn, "INSERT INTO bids (item_id, user_id, bidder_name, bidder_email, bid_amount, bid_status, ip_address, user_agent, created_at, status) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NOW(), 'active')");
             mysqli_stmt_bind_param($ins_bid, "iissdss", $b_item_id, $user_id, $u_name, $u_email, $b_amount, $ip_addr, $ua);
             mysqli_stmt_execute($ins_bid);
+            mysqli_stmt_close($ins_bid);
 
+            // Anti-sniping: extend end_time and extended_time together
             $extended = false;
             $remaining_secs = $end_ts - $now;
             if ($remaining_secs <= 180 && $remaining_secs > 0) {
-                $extend_stmt = mysqli_prepare($conn, "UPDATE items SET end_time = DATE_ADD(end_time, INTERVAL 3 MINUTE), auto_extend_count = auto_extend_count + 1 WHERE id = ?");
-                mysqli_stmt_bind_param($extend_stmt, "i", $b_item_id);
-                mysqli_stmt_execute($extend_stmt);
+                $extend_stmt = mysqli_prepare($conn, "UPDATE items SET end_time = DATE_ADD(GREATEST(end_time, NOW()), INTERVAL 3 MINUTE), extended_time = NOW() WHERE id = ?");
+                if ($extend_stmt) {
+                    mysqli_stmt_bind_param($extend_stmt, "i", $b_item_id);
+                    mysqli_stmt_execute($extend_stmt);
+                    mysqli_stmt_close($extend_stmt);
+                }
                 $extended = true;
             }
 
             $up_item = mysqli_prepare($conn, "UPDATE items SET current_price = ?, bid_count = bid_count + 1 WHERE id = ?");
             mysqli_stmt_bind_param($up_item, "di", $b_amount, $b_item_id);
             mysqli_stmt_execute($up_item);
+            mysqli_stmt_close($up_item);
 
             mysqli_commit($conn);
 
@@ -264,9 +419,10 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             }
             sendNotification($conn, $item_data['seller_id'], 'bid', 'New Bid Received', "New bid of Rs. " . number_format($b_amount, 2) . " placed on your listing.", "live_auction.php?id=$b_item_id");
             runAutoBids($conn, $b_item_id, $b_amount, $user_id);
+
             echo json_encode([
                 'success' => true,
-                'message' => 'Your bid of Rs. ' . number_format($b_amount, 2) . ' was placed successfully!' . ($extended ? ' (Auction extended by 3 mins)' : ''),
+                'message' => 'Your bid of Rs. ' . number_format($b_amount, 2) . ' was placed successfully!' . ($extended ? ' (Anti-Sniping: Extended by 3 mins)' : ''),
                 'extended' => $extended
             ]);
             exit();
@@ -278,6 +434,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         }
     }
 
+    // 3. Wishlist / Watchlist Toggle
     if ($action === 'toggle_watchlist') {
         if (!$is_authenticated) {
             echo json_encode(['success' => false, 'error' => 'Please sign in to manage your watchlist.', 'redirect' => 'login.php']);
@@ -285,7 +442,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         }
         $w_item_id = (int)($_POST['item_id'] ?? 0);
         if ($w_item_id <= 0 || !$has_db) {
-            echo json_encode(['success' => false, 'error' => 'Invalid lot.']);
+            echo json_encode(['success' => false, 'error' => 'Invalid lot request.']);
             exit();
         }
 
@@ -298,26 +455,31 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             $del = mysqli_prepare($conn, "DELETE FROM wishlist WHERE id = ?");
             mysqli_stmt_bind_param($del, "i", $w_row['id']);
             mysqli_stmt_execute($del);
+            mysqli_stmt_close($del);
             $in_watchlist = false;
         } else {
             $ins = mysqli_prepare($conn, "INSERT INTO wishlist (user_id, item_id, created_at) VALUES (?, ?, NOW())");
             mysqli_stmt_bind_param($ins, "ii", $user_id, $w_item_id);
             mysqli_stmt_execute($ins);
+            mysqli_stmt_close($ins);
             $in_watchlist = true;
         }
+        mysqli_stmt_close($chk);
 
         $cnt_stmt = mysqli_prepare($conn, "SELECT COUNT(*) AS c FROM wishlist WHERE item_id = ?");
         mysqli_stmt_bind_param($cnt_stmt, "i", $w_item_id);
         mysqli_stmt_execute($cnt_stmt);
         $w_count = mysqli_fetch_assoc(mysqli_stmt_get_result($cnt_stmt))['c'] ?? 0;
+        mysqli_stmt_close($cnt_stmt);
 
         echo json_encode(['success' => true, 'in_watchlist' => $in_watchlist, 'count' => (int)$w_count]);
         exit();
     }
 
+    // 4. Auto-Bid Setup
     if ($action === 'set_autobid') {
         if (!$is_authenticated) {
-            echo json_encode(['success' => false, 'error' => 'Please sign in to configure Auto-Bid.']);
+            echo json_encode(['success' => false, 'error' => 'Please sign in to configure Auto-Bid.', 'redirect' => 'login.php']);
             exit();
         }
         $ab_item_id = (int)($_POST['item_id'] ?? 0);
@@ -332,6 +494,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         mysqli_stmt_bind_param($it_stmt, "i", $ab_item_id);
         mysqli_stmt_execute($it_stmt);
         $it_data = mysqli_fetch_assoc(mysqli_stmt_get_result($it_stmt));
+        mysqli_stmt_close($it_stmt);
 
         if (!$it_data || $it_data['status'] !== 'active') {
             echo json_encode(['success' => false, 'error' => 'Auction is not active.']);
@@ -356,16 +519,18 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         ");
         mysqli_stmt_bind_param($ab_upsert, "iid", $ab_item_id, $user_id, $max_bid);
         mysqli_stmt_execute($ab_upsert);
+        mysqli_stmt_close($ab_upsert);
 
         runAutoBids($conn, $ab_item_id, $base, 0);
 
-        echo json_encode(['success' => true, 'message' => "Auto-Bid configured up to Rs. " . number_format($max_bid, 2)]);
+        echo json_encode(['success' => true, 'message' => "Auto-Bid configured successfully up to Rs. " . number_format($max_bid, 2)]);
         exit();
     }
 
+    // 5. Buy It Now
     if ($action === 'buy_it_now') {
         if (!$is_authenticated) {
-            echo json_encode(['success' => false, 'error' => 'Please sign in to purchase.']);
+            echo json_encode(['success' => false, 'error' => 'Please sign in to purchase.', 'redirect' => 'login.php']);
             exit();
         }
         $bin_id = (int)($_POST['item_id'] ?? 0);
@@ -380,6 +545,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             mysqli_stmt_bind_param($stmt, "i", $bin_id);
             mysqli_stmt_execute($stmt);
             $item = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+            mysqli_stmt_close($stmt);
 
             if (!$item || $item['status'] !== 'active') throw new Exception("Auction is closed.");
             if (empty($item['buy_it_now_price']) || (float)$item['buy_it_now_price'] <= 0) throw new Exception("Buy It Now not enabled for this lot.");
@@ -387,13 +553,21 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
 
             $bin_price = (float)$item['buy_it_now_price'];
 
-            $up = mysqli_prepare($conn, "UPDATE items SET status = 'completed', winner_id = ?, current_price = ? WHERE id = ?");
+            // Schema compliant ENUM: 'sold'
+            $up = mysqli_prepare($conn, "UPDATE items SET status = 'sold', winner_id = ?, current_price = ? WHERE id = ?");
             mysqli_stmt_bind_param($up, "idi", $user_id, $bin_price, $bin_id);
             mysqli_stmt_execute($up);
+            mysqli_stmt_close($up);
 
-            $tx = mysqli_prepare($conn, "INSERT INTO transactions (item_id, buyer_id, seller_id, amount, payment_type, status, created_at) VALUES (?, ?, ?, ?, 'buy_it_now', 'completed', NOW())");
-            mysqli_stmt_bind_param($tx, "iiid", $bin_id, $user_id, $item['seller_id'], $bin_price);
-            mysqli_stmt_execute($tx);
+            // Schema compliant transactions table insertion
+            try {
+                $tx = mysqli_prepare($conn, "INSERT INTO transactions (user_id, type, amount, item_id, description, status, created_at) VALUES (?, 'winning_payment', ?, ?, 'Purchased via Buy It Now', 'completed', NOW())");
+                if ($tx) {
+                    mysqli_stmt_bind_param($tx, "idis", $user_id, $bin_price, $bin_id, $bin_price);
+                    mysqli_stmt_execute($tx);
+                    mysqli_stmt_close($tx);
+                }
+            } catch (Exception $txe) {}
 
             mysqli_commit($conn);
 
@@ -410,6 +584,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         }
     }
 
+    // 6. Modal Details
     if ($action === 'get_modal_details') {
         $mid = (int)($_GET['item_id'] ?? 0);
         if ($mid <= 0 || !$has_db) {
@@ -427,6 +602,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         mysqli_stmt_bind_param($m_stmt, "i", $mid);
         mysqli_stmt_execute($m_stmt);
         $m_item = mysqli_fetch_assoc(mysqli_stmt_get_result($m_stmt));
+        mysqli_stmt_close($m_stmt);
 
         if (!$m_item) {
             echo json_encode(['success' => false, 'error' => 'Lot not found']);
@@ -436,8 +612,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         $m_price = max((float)$m_item['current_price'], (float)$m_item['starting_price']);
         $m_inc = (float)($m_item['min_increment'] > 0 ? $m_item['min_increment'] : 100.00);
         $m_next = $m_price + $m_inc;
-        $m_reserve_met = ($m_item['reserve_price'] <= 0 || $m_price >= (float)$m_item['reserve_price']);
+        $m_reserve_met = (empty($m_item['reserve_price']) || $m_price >= (float)$m_item['reserve_price']);
         $m_dist = getDistanceKm($user_lat, $user_lng, $m_item['location_lat'] ?? 0, $m_item['location_lng'] ?? 0);
+        $m_images = parseItemImages($conn, (int)$m_item['id'], $m_item['images'] ?? '', $m_item['featured_image'] ?? '');
 
         echo json_encode([
             'success' => true,
@@ -445,7 +622,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             'auction_code' => $m_item['auction_code'] ?? ('LOT-'.$m_item['id']),
             'title' => htmlspecialchars($m_item['title']),
             'description' => htmlspecialchars($m_item['description'] ?? ''),
-            'image' => htmlspecialchars($m_item['featured_image'] ?? 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=800&q=80'),
+            'image' => htmlspecialchars($m_images[0] ?? 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=800&q=80'),
             'current_price' => number_format($m_price, 2),
             'next_min' => number_format($m_next, 2),
             'raw_next_min' => $m_next,
@@ -468,6 +645,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     exit();
 }
 
+// --------------------------------------------------------------------------
+// Seller & Admin Management POST Actions
+// --------------------------------------------------------------------------
 $seller_message = '';
 $seller_success = false;
 if (($role === 'seller' || $role === 'admin') && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -486,21 +666,25 @@ if (($role === 'seller' || $role === 'admin') && $_SERVER['REQUEST_METHOD'] === 
             if ($top_bid = mysqli_fetch_assoc($bid_res)) {
                 $winner_id = (int)$top_bid['user_id'];
                 $winning_bid_id = (int)$top_bid['id'];
-                $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'completed', winner_id = ?, winning_bid_id = ? WHERE id = ?");
+                $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'sold', winner_id = ?, winning_bid_id = ? WHERE id = ?");
                 mysqli_stmt_bind_param($up_item, "iii", $winner_id, $winning_bid_id, $post_item_id);
                 mysqli_stmt_execute($up_item);
+                mysqli_stmt_close($up_item);
                 
                 $up_bid = mysqli_prepare($conn, "UPDATE bids SET is_winning = 1, status = 'accepted' WHERE id = ?");
                 mysqli_stmt_bind_param($up_bid, "i", $winning_bid_id);
                 mysqli_stmt_execute($up_bid);
+                mysqli_stmt_close($up_bid);
                 
                 sendNotification($conn, $winner_id, 'auction', 'Bid Accepted!', "Congratulations! Your bid was accepted for lot #$post_item_id.", "live_auction.php?id=$post_item_id");
                 $seller_success = true;
-                $seller_message = "Bid accepted successfully! Item marked as completed.";
+                $seller_message = "Bid accepted successfully! Item marked as sold.";
             } else {
                 $seller_message = "No bids found to accept for this item.";
             }
+            mysqli_stmt_close($bid_stmt);
         }
+        mysqli_stmt_close($chk_stmt);
     }
     
     if (isset($_POST['reject_bid']) && $has_db) {
@@ -509,17 +693,20 @@ if (($role === 'seller' || $role === 'admin') && $_SERVER['REQUEST_METHOD'] === 
         else mysqli_stmt_bind_param($chk_stmt, "i", $post_item_id);
         mysqli_stmt_execute($chk_stmt);
         if (mysqli_stmt_get_result($chk_stmt)->num_rows > 0) {
-            $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'closed' WHERE id = ?");
+            $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'ended' WHERE id = ?");
             mysqli_stmt_bind_param($up_item, "i", $post_item_id);
             mysqli_stmt_execute($up_item);
+            mysqli_stmt_close($up_item);
             
             $up_bids = mysqli_prepare($conn, "UPDATE bids SET status = 'rejected' WHERE item_id = ?");
             mysqli_stmt_bind_param($up_bids, "i", $post_item_id);
             mysqli_stmt_execute($up_bids);
+            mysqli_stmt_close($up_bids);
 
             $seller_success = true;
-            $seller_message = "Auction bid rejected and item closed.";
+            $seller_message = "Auction bid rejected and auction ended.";
         }
+        mysqli_stmt_close($chk_stmt);
     }
     
     if (isset($_POST['delete_item']) && $has_db) {
@@ -535,16 +722,23 @@ if (($role === 'seller' || $role === 'admin') && $_SERVER['REQUEST_METHOD'] === 
             $del_stmt = mysqli_prepare($conn, "DELETE FROM items WHERE id = ?");
             mysqli_stmt_bind_param($del_stmt, "i", $post_item_id);
             mysqli_stmt_execute($del_stmt);
+            mysqli_stmt_close($del_stmt);
             
             $del_bids = mysqli_prepare($conn, "DELETE FROM bids WHERE item_id = ?");
             mysqli_stmt_bind_param($del_bids, "i", $post_item_id);
             mysqli_stmt_execute($del_bids);
+            mysqli_stmt_close($del_bids);
             
             $seller_success = true;
             $seller_message = "Item deleted successfully.";
         }
+        mysqli_stmt_close($chk_stmt);
     }
 } 
+
+// --------------------------------------------------------------------------
+// Catalog Filtering & Active Lot Data Loading
+// --------------------------------------------------------------------------
 $item_id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 $show_all = isset($_GET['all']) && $_GET['all'] == '1';
 $selected_category = isset($_GET['category_id']) ? (int)$_GET['category_id'] : 0;
@@ -585,6 +779,7 @@ if ($has_db) {
             if ($seller_q && $s_row = mysqli_fetch_assoc($seller_q)) {
                 $current_item['seller_name'] = $s_row['name'];
             }
+            mysqli_stmt_close($seller_stmt);
         }
     }
     if ($current_item) {
@@ -602,6 +797,7 @@ if ($has_db) {
             mysqli_stmt_bind_param($w_chk, "ii", $user_id, $current_item['id']);
             mysqli_stmt_execute($w_chk);
             if (mysqli_stmt_get_result($w_chk)->num_rows > 0) $is_watched = true;
+            mysqli_stmt_close($w_chk);
         }
         $w_cnt_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM wishlist WHERE item_id = " . (int)$current_item['id']);
         if ($w_cnt_res) $watcher_count = (int)mysqli_fetch_assoc($w_cnt_res)['c'];
@@ -674,38 +870,6 @@ if ($has_db) {
     $all_products_res = mysqli_stmt_get_result($stmt_all);
 
     $categories_res = mysqli_query($conn, "SELECT id, name, slug FROM categories WHERE status = 1 ORDER BY sort_order ASC");
-} else {
-    $current_item = [
-        'id' => 1,
-        'auction_code' => 'LOT-4092',
-        'title' => '2023 Porsche 911 GT3 Touring (992) - 6-Speed Manual',
-        'category_id' => 1,
-        'cat_name' => 'Vehicles',
-        'condition' => 'new',
-        'location' => 'Sindh',
-        'location_city' => 'Hyderabad',
-        'location_area' => 'Qasimabad',
-        'location_lat' => 25.3960,
-        'location_lng' => 68.3578,
-        'seller_id' => 200,
-        'seller_name' => 'Apex Motors Karachi',
-        'starting_price' => 17500000.00,
-        'current_price' => 18450000.00,
-        'min_increment' => 50000.00,
-        'reserve_price' => 18000000.00,
-        'buy_it_now_price' => 21000000.00,
-        'bid_count' => 19,
-        'status' => 'active',
-        'end_time' => date('Y-m-d H:i:s', time() + 380),
-        'featured_image' => 'https://images.unsplash.com/photo-1614162692292-7ac56d7f7f1e?auto=format&fit=crop&w=1200&q=80',
-        'images' => 'https://images.unsplash.com/photo-1614162692292-7ac56d7f7f1e?auto=format&fit=crop&w=1200&q=80',
-        'description' => "Original Paint-to-Sample Oak Green Metallic over Cohiba Brown bucket leather. 4.0-liter naturally aspirated flat-six paired with 6-speed GT sports manual transmission."
-    ];
-    $totalItems = 5;
-    $totalBidsOverall = 42;
-    $categories_res = false;
-    $is_watched = false;
-    $watcher_count = 7;
 }
 
 $active_filters = [];
@@ -717,6 +881,7 @@ if ($selected_category > 0 && $has_db) {
     if ($cat_name_res && $cat_row = mysqli_fetch_assoc($cat_name_res)) {
         $active_filters[] = ['key' => 'category_id', 'label' => 'Category', 'value' => $cat_row['name']];
     }
+    mysqli_stmt_close($cat_stmt);
 }
 if (!empty($search_query)) {
     $active_filters[] = ['key' => 'q', 'label' => 'Search', 'value' => $search_query];
@@ -738,31 +903,6 @@ function buildFilterUrl($remove_key = '', $current_get = []) {
     if (empty($params)) return 'live_auction.php';
     return 'live_auction.php?' . http_build_query($params);
 }
-
-function buildFilterParamsStr($overrides = []) {
-    global $show_all, $item_id, $selected_category, $search_query, $sort_by, $min_price, $max_price, $selected_condition, $selected_location, $selected_radius;
-    $parts = [];
-    if (!empty($overrides['id']) || $item_id > 0) {
-        $parts[] = 'id=' . (!empty($overrides['id']) ? $overrides['id'] : $item_id);
-    }
-    if (!empty($overrides['all']) || $show_all) {
-        $parts[] = 'all=1';
-    }
-    if (!isset($overrides['category_id']) && $selected_category > 0) {
-        $parts[] = 'category_id=' . $selected_category;
-    }
-    if (!isset($overrides['q']) && !empty($search_query)) {
-        $parts[] = 'q=' . urlencode($search_query);
-    }
-    if (!isset($overrides['sort']) && $sort_by !== 'latest') {
-        $parts[] = 'sort=' . $sort_by;
-    }
-    if ($selected_radius > 0) {
-        $parts[] = 'radius=' . $selected_radius;
-    }
-    return implode('&', $parts);
-}
-$filter_qs = buildFilterParamsStr();
 
 $catalog_list = [];
 if ($all_products_res) {
@@ -880,11 +1020,18 @@ if ($all_products_res) {
                     <?php endforeach; ?>
                 </div>
 
-                <!-- Card View / Grid View Button Icon Added -->
-                <a href="?view=<?php echo $view_mode === 'map' ? 'grid' : 'map'; ?><?php echo $item_id ? '&id='.$item_id : ''; ?>" 
-                   class="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition ml-1" title="Card View">
-                    <i class="fa-solid <?php echo $view_mode === 'map' ? 'fa-table-cells text-emerald-600' : 'fa-table-cells text-emerald-600'; ?>"></i>
-                    <span><?php echo $view_mode === 'map' ? 'Card View' : 'Card View'; ?></span>
+                <!-- View Switcher (Map View / Grid View toggle preserving URL filters) -->
+                <?php 
+                    $toggle_view = ($view_mode === 'map' ? 'grid' : 'map');
+                    $view_params = $current_get;
+                    $view_params['view'] = $toggle_view;
+                    $view_toggle_url = 'live_auction.php?' . http_build_query($view_params);
+                ?>
+                <a href="<?php echo htmlspecialchars($view_toggle_url); ?>" 
+                   class="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition ml-1" 
+                   title="<?php echo $view_mode === 'map' ? 'Switch to Grid View' : 'Switch to Map View'; ?>">
+                    <i class="fa-solid <?php echo $view_mode === 'map' ? 'fa-table-cells text-emerald-600' : 'fa-map-location-dot text-emerald-600'; ?>"></i>
+                    <span><?php echo $view_mode === 'map' ? 'Grid View' : 'Map View'; ?></span>
                 </a>
             </div>
 
@@ -892,6 +1039,7 @@ if ($all_products_res) {
                 <?php if ($item_id > 0): ?><input type="hidden" name="id" value="<?php echo $item_id; ?>"><?php endif; ?>
                 <?php if ($show_all): ?><input type="hidden" name="all" value="1"><?php endif; ?>
                 <?php if ($selected_category > 0): ?><input type="hidden" name="category_id" value="<?php echo $selected_category; ?>"><?php endif; ?>
+                <?php if ($view_mode === 'map'): ?><input type="hidden" name="view" value="map"><?php endif; ?>
 
                 <div class="relative flex-1 max-w-sm">
                     <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
@@ -940,18 +1088,13 @@ if ($all_products_res) {
         $next_min_bid = $display_price + $min_inc;
         $reserve_met = (empty($current_item['reserve_price']) || $display_price >= (float)$current_item['reserve_price']);
         
-        $gallery_images = [];
-        if (!empty($current_item['featured_image'])) $gallery_images[] = $current_item['featured_image'];
-        if (!empty($current_item['images'])) {
-            foreach (explode(',', $current_item['images']) as $img_path) {
-                $trimmed = trim($img_path);
-                if (!empty($trimmed) && !in_array($trimmed, $gallery_images)) $gallery_images[] = $trimmed;
-            }
-        }
-        if (empty($gallery_images)) $gallery_images[] = "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=800&q=80";
+        $gallery_images = parseItemImages($conn, (int)$current_item['id'], $current_item['images'] ?? '', $current_item['featured_image'] ?? '');
         $main_img = $gallery_images[0];
         $is_owner_seller = ($role === 'seller' && (int)($current_item['seller_id'] ?? 0) === $user_id) || $role === 'admin';
         $dist_km = getDistanceKm($user_lat, $user_lng, $current_item['location_lat'] ?? 0, $current_item['location_lng'] ?? 0);
+        $effective_item_end = (!empty($current_item['extended_time']) && $current_item['extended_time'] != '0000-00-00 00:00:00' && strtotime($current_item['extended_time']) > strtotime($current_item['end_time']))
+            ? $current_item['extended_time']
+            : $current_item['end_time'];
     ?>
     <section class="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
         <div class="grid grid-cols-1 lg:grid-cols-12">
@@ -1105,7 +1248,7 @@ if ($all_products_res) {
                             <form method="POST" action="" class="flex flex-wrap items-center gap-2">
                                 <input type="hidden" name="item_id" value="<?php echo $current_item['id']; ?>">
                                 
-                                <button type="submit" name="accept_bid" onclick="return confirm('Accept the highest bid and mark this auction as completed?');" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer">
+                                <button type="submit" name="accept_bid" onclick="return confirm('Accept the highest bid and mark this auction as sold?');" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer">
                                     <i class="fa-solid fa-check"></i> Accept Top Bid
                                 </button>
                                 
@@ -1120,6 +1263,23 @@ if ($all_products_res) {
                         </div>
                     <?php elseif ($current_item['status'] === 'active'): ?>
                         <div class="space-y-3">
+                            <!-- Quick Bid Increment Buttons (+Min, +500, +1k, +5k) -->
+                            <div class="flex items-center gap-1.5 flex-wrap text-xs pb-1">
+                                <span class="text-slate-400 font-semibold text-[11px] mr-1">Quick Bid:</span>
+                                <button type="button" onclick="setQuickIncrement(0)" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 border border-slate-200 text-xs font-semibold transition cursor-pointer">
+                                    Min Bid
+                                </button>
+                                <button type="button" onclick="setQuickIncrement(500)" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 border border-slate-200 text-xs font-semibold transition cursor-pointer">
+                                    +Rs. 500
+                                </button>
+                                <button type="button" onclick="setQuickIncrement(1000)" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 border border-slate-200 text-xs font-semibold transition cursor-pointer">
+                                    +Rs. 1,000
+                                </button>
+                                <button type="button" onclick="setQuickIncrement(5000)" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 border border-slate-200 text-xs font-semibold transition cursor-pointer">
+                                    +Rs. 5,000
+                                </button>
+                            </div>
+
                             <form id="bidForm" class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                                 <input type="hidden" name="item_id" id="currentLotId" value="<?php echo $current_item['id']; ?>">
                                 <div class="relative flex-1">
@@ -1187,10 +1347,17 @@ if ($all_products_res) {
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
             <?php if (!empty($catalog_list)): ?>
                 <?php foreach($catalog_list as $prod): 
-                    $p_price = $prod['current_price'] > 0 ? $prod['current_price'] : $prod['starting_price'];
+                    $p_price = ($prod['current_price'] ?? 0) > 0 ? (float)$prod['current_price'] : (float)($prod['starting_price'] ?? 0);
                     $is_highlighted = ($current_item && (int)$prod['id'] === (int)$current_item['id']);
                     $card_qs = 'id=' . $prod['id'];
-                    $grid_img = !empty($prod['featured_image']) ? $prod['featured_image'] : "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=400&q=80";
+                    $grid_img = !empty($prod['featured_image']) ? cleanImagePath($prod['featured_image']) : '';
+                    if (empty($grid_img) && !empty($prod['images'])) {
+                        $p_imgs = parseItemImages(null, 0, $prod['images'], '');
+                        $grid_img = $p_imgs[0] ?? '';
+                    }
+                    if (empty($grid_img)) {
+                        $grid_img = "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=400&q=80";
+                    }
                     $p_dist = $prod['dist_km'];
                     $diff_secs = strtotime($prod['end_time'] ?? '') - time();
                     $is_ending_soon = ($diff_secs > 0 && $diff_secs <= 600);
@@ -1242,6 +1409,7 @@ if ($all_products_res) {
         </div>
     </div>
 </div>
+
 <div id="filterDrawerBackdrop" class="filter-drawer-backdrop fixed inset-0 bg-slate-950/40 backdrop-blur-xs z-50 flex justify-end">
     <div id="filterDrawerPanel" class="filter-drawer-panel w-full max-w-md bg-white h-full shadow-2xl flex flex-col justify-between overflow-y-auto">
         <div class="p-5 border-b border-slate-100 flex items-center justify-between">
@@ -1360,8 +1528,38 @@ if ($all_products_res) {
     </div>
 </div>
 
+<!-- Generic Interactive Action Popup Modal (Replaces browser alert) -->
+<div id="genericActionModal" class="auction-modal-backdrop fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-sm w-full p-6 text-center shadow-2xl relative">
+        <button type="button" onclick="closeGenericModal()" class="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition">
+            <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+        <div id="genericModalIconRing" class="w-14 h-14 rounded-full mx-auto mb-3 flex items-center justify-center text-2xl">
+            <i id="genericModalIcon" class="fa-solid"></i>
+        </div>
+        <h3 id="genericModalTitle" class="text-lg font-bold text-slate-900 mb-1.5"></h3>
+        <p id="genericModalMsg" class="text-xs text-slate-600 mb-4 leading-relaxed"></p>
+        <button type="button" id="genericModalBtn" onclick="closeGenericModal()" class="w-full py-2.5 rounded-xl font-bold text-xs text-white transition shadow-sm"></button>
+    </div>
+</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
+    // Safe Cross-Browser Date Parser (Prevents NaN crashes on Safari / iOS)
+    function parseSafeDateMs(dateStr) {
+        if (!dateStr) return 0;
+        var s = String(dateStr).trim();
+        if (s.indexOf('T') === -1 && s.indexOf(' ') !== -1) {
+            s = s.replace(' ', 'T');
+        }
+        var ms = new Date(s).getTime();
+        if (isNaN(ms)) {
+            ms = new Date(s.replace(/-/g, "/")).getTime();
+        }
+        return isNaN(ms) ? 0 : ms;
+    }
+
+    // Filter Drawer Management
     (function initFilterDrawer() {
         var openBtn = document.getElementById('openDrawerBtn');
         var closeBtn = document.getElementById('closeDrawerBtn');
@@ -1387,6 +1585,8 @@ if ($all_products_res) {
             });
         }
     })();
+
+    // Image Gallery Carousel
     var currentImgIndex = 0;
     var galleryImages = <?php echo json_encode($gallery_images ?? []); ?>;
     function setMainImage(src, thumb) {
@@ -1420,7 +1620,9 @@ if ($all_products_res) {
         });
     }
     <?php endif; ?>
-    var endTimeMs = new Date("<?php echo $current_item['end_time'] ?? ''; ?>").getTime();
+
+    // Countdown Timer with Anti-Sniping Awareness
+    var endTimeMs = parseSafeDateMs("<?php echo $effective_item_end ?? ($current_item['end_time'] ?? ''); ?>");
     var timerInterval = setInterval(function() {
         var now = new Date().getTime();
         var distance = endTimeMs - now;
@@ -1451,6 +1653,23 @@ if ($all_products_res) {
             }
         }
     }, 1000);
+
+    // Quick Bid Increment Pill Handler
+    function setQuickIncrement(addAmount) {
+        var input = document.getElementById('bidAmountInput');
+        if (!input) return;
+        var minVal = parseFloat(input.getAttribute('min')) || 0;
+        if (addAmount === 0) {
+            input.value = minVal;
+        } else {
+            var cur = parseFloat(input.value) || minVal;
+            input.value = Math.max(minVal, cur) + addAmount;
+        }
+        input.classList.add('ring-2', 'ring-emerald-500');
+        setTimeout(() => input.classList.remove('ring-2', 'ring-emerald-500'), 400);
+    }
+
+    // Real-Time Polling for Active Lot
     var currentLotId = <?php echo (int)($current_item['id'] ?? 0); ?>;
     function pollAuctionData() {
         if (!currentLotId) return;
@@ -1462,12 +1681,12 @@ if ($all_products_res) {
                     document.getElementById('bidCountDisplay').textContent = data.bid_count;
                     document.getElementById('watcherCountDisplay').textContent = data.watcher_count;
                     document.getElementById('nextMinBidDisplay').textContent = 'Rs. ' + data.next_min_formatted;
-                        var input = document.getElementById('bidAmountInput');
-                            if (input) {
-                                input.setAttribute('min', data.raw_next_min);
-                                input.setAttribute('placeholder', 'Enter at least Rs. ' + data.next_min_formatted);
-                            }
-                        endTimeMs = new Date(data.end_time).getTime();
+                    var input = document.getElementById('bidAmountInput');
+                    if (input) {
+                        input.setAttribute('min', data.raw_next_min);
+                        input.setAttribute('placeholder', 'Enter at least Rs. ' + data.next_min_formatted);
+                    }
+                    endTimeMs = parseSafeDateMs(data.end_time);
 
                     var resBadge = document.getElementById('reserveStatusBadge');
                     if (resBadge) {
@@ -1496,6 +1715,8 @@ if ($all_products_res) {
             .catch(() => {});
     }
     setInterval(pollAuctionData, 3000);
+
+    // Bid Form Handler
     var bidForm = document.getElementById('bidForm');
     if (bidForm) {
         bidForm.addEventListener('submit', function(e) {
@@ -1503,43 +1724,76 @@ if ($all_products_res) {
             var input = document.getElementById('bidAmountInput');
             var minVal = parseFloat(input.getAttribute('min'));
             var val = parseFloat(input.value);
-                if (isNaN(val) || val < minVal) {
-                    input.classList.add('bid-input-error');
-                    input.focus();
-                    setTimeout(() => input.classList.remove('bid-input-error'), 1800);
-                    return;
-                }
-                var btn = document.getElementById('bidSubmitBtn');
-                btn.disabled = true;
-                var fd = new FormData();
-                fd.append('action', 'ajax_place_bid');
-                fd.append('item_id', currentLotId);
-                fd.append('bid_amount', val);
-                fetch('live_auction.php?ajax=1', { method: 'POST', body: fd })
-                    .then(r => r.json())
-                    .then(res => {
-                        btn.disabled = false;
-                        var toast = document.getElementById('liveBidToast');
-                        toast.classList.remove('hidden', 'bg-emerald-50', 'text-emerald-800', 'border-emerald-200', 'bg-rose-50', 'text-rose-800', 'border-rose-200');
-                        if (res.success) {
-                            toast.classList.add('bg-emerald-50', 'text-emerald-800', 'border', 'border-emerald-200');
-                            toast.innerHTML = '<i class="fa-solid fa-circle-check text-emerald-600 text-lg"></i><div>' + res.message + '</div>';
-                            input.value = '';
-                            pollAuctionData();
-                        } else {
-                            if (res.redirect) {
-                                window.location.href = res.redirect;
-                                return;
-                            }
-                            toast.classList.add('bg-rose-50', 'text-rose-800', 'border', 'border-rose-200');
-                            toast.innerHTML = '<i class="fa-solid fa-circle-exclamation text-rose-600 text-lg"></i><div>' + res.error + '</div>';
+            if (isNaN(val) || val < minVal) {
+                input.classList.add('bid-input-error');
+                input.focus();
+                setTimeout(() => input.classList.remove('bid-input-error'), 1800);
+                return;
+            }
+            var btn = document.getElementById('bidSubmitBtn');
+            btn.disabled = true;
+            var fd = new FormData();
+            fd.append('action', 'ajax_place_bid');
+            fd.append('item_id', currentLotId);
+            fd.append('bid_amount', val);
+            fetch('live_auction.php?ajax=1', { method: 'POST', body: fd })
+                .then(r => r.json())
+                .then(res => {
+                    btn.disabled = false;
+                    var toast = document.getElementById('liveBidToast');
+                    toast.classList.remove('hidden', 'bg-emerald-50', 'text-emerald-800', 'border-emerald-200', 'bg-rose-50', 'text-rose-800', 'border-rose-200');
+                    if (res.success) {
+                        toast.classList.add('bg-emerald-50', 'text-emerald-800', 'border', 'border-emerald-200');
+                        toast.innerHTML = '<i class="fa-solid fa-circle-check text-emerald-600 text-lg"></i><div>' + res.message + '</div>';
+                        input.value = '';
+                        pollAuctionData();
+                    } else {
+                        if (res.redirect) {
+                            window.location.href = res.redirect;
+                            return;
                         }
-                        setTimeout(() => toast.classList.add('hidden'), 5000);
-                    })
-                    .catch(() => { btn.disabled = false; });
-            });
-        }
+                        toast.classList.add('bg-rose-50', 'text-rose-800', 'border', 'border-rose-200');
+                        toast.innerHTML = '<i class="fa-solid fa-circle-exclamation text-rose-600 text-lg"></i><div>' + res.error + '</div>';
+                    }
+                    setTimeout(() => toast.classList.add('hidden'), 5000);
+                })
+                .catch(() => { btn.disabled = false; });
+        });
+    }
 
+    function showLiveModalPopup(title, message, isSuccess) {
+        var modal = document.getElementById('genericActionModal');
+        var iconRing = document.getElementById('genericModalIconRing');
+        var icon = document.getElementById('genericModalIcon');
+        var titleEl = document.getElementById('genericModalTitle');
+        var msgEl = document.getElementById('genericModalMsg');
+        var btn = document.getElementById('genericModalBtn');
+
+        if (!modal) return;
+        if (isSuccess) {
+            iconRing.className = 'w-14 h-14 rounded-full mx-auto mb-3 flex items-center justify-center text-2xl bg-emerald-50 text-emerald-600 border-2 border-emerald-200';
+            icon.className = 'fa-solid fa-circle-check';
+            btn.className = 'w-full py-2.5 rounded-xl font-bold text-xs text-white transition shadow-sm bg-emerald-600 hover:bg-emerald-700 cursor-pointer';
+            btn.textContent = 'Continue';
+        } else {
+            iconRing.className = 'w-14 h-14 rounded-full mx-auto mb-3 flex items-center justify-center text-2xl bg-rose-50 text-rose-600 border-2 border-rose-200';
+            icon.className = 'fa-solid fa-circle-exclamation';
+            btn.className = 'w-full py-2.5 rounded-xl font-bold text-xs text-white transition shadow-sm bg-rose-600 hover:bg-rose-700 cursor-pointer';
+            btn.textContent = 'Okay, Got It';
+        }
+        titleEl.textContent = title;
+        msgEl.textContent = message;
+        modal.classList.add('is-open');
+        document.body.style.overflow = 'hidden';
+    }
+
+    function closeGenericModal() {
+        var modal = document.getElementById('genericActionModal');
+        if (modal) modal.classList.remove('is-open');
+        document.body.style.overflow = '';
+    }
+
+    // Watchlist Toggle
     function toggleWatchlist(itemId) {
         var fd = new FormData();
         fd.append('action', 'toggle_watchlist');
@@ -1558,11 +1812,12 @@ if ($all_products_res) {
                 } else if (data.redirect) {
                     window.location.href = data.redirect;
                 } else {
-                    alert(data.error);
+                    showLiveModalPopup('Watchlist Notice', data.error, false);
                 }
             });
     }
 
+    // Auto-Bid Setup Prompt
     function openAutoBidPrompt(itemId) {
         var targetId = itemId || currentLotId;
         var maxAmount = prompt("Enter your Maximum Bid limit for Auto-Bid (Rs.):");
@@ -1575,12 +1830,13 @@ if ($all_products_res) {
             fetch('live_auction.php?ajax=1', { method: 'POST', body: fd })
                 .then(r => r.json())
                 .then(data => {
-                    alert(data.message || data.error);
+                    showLiveModalPopup(data.success ? 'Auto-Bid Active' : 'Auto-Bid Error', data.message || data.error, data.success);
                     if (data.success) pollAuctionData();
                 });
         }
     }
 
+    // Buy It Now Confirm
     function confirmBuyItNow(itemId, price) {
         if (!confirm("Are you sure you want to purchase this lot immediately for Rs. " + Number(price).toLocaleString() + "? This will end the auction.")) return;
         var fd = new FormData();
@@ -1590,11 +1846,12 @@ if ($all_products_res) {
         fetch('live_auction.php?ajax=1', { method: 'POST', body: fd })
             .then(r => r.json())
             .then(data => {
-                alert(data.message || data.error);
-                if (data.success) window.location.reload();
+                showLiveModalPopup(data.success ? 'Purchase Complete' : 'Purchase Error', data.message || data.error, data.success);
+                if (data.success) setTimeout(() => window.location.reload(), 1500);
             });
     }
 
+    // Modal Details View
     function openDetailsModal(itemId) {
         fetch('live_auction.php?ajax=1&action=get_modal_details&item_id=' + itemId)
             .then(r => r.json())
@@ -1629,7 +1886,7 @@ if ($all_products_res) {
                     document.getElementById('auctionDetailsModal').classList.add('is-open');
                     document.body.style.overflow = 'hidden';
                 } else {
-                    alert(data.error);
+                    showLiveModalPopup('Item Details Error', data.error, false);
                 }
             });
     }
@@ -1639,6 +1896,7 @@ if ($all_products_res) {
         document.body.style.overflow = '';
     }
 
+    // Geo-Auction Leaflet Map
     <?php if ($view_mode === 'map'): ?>
     document.addEventListener("DOMContentLoaded", function() {
         var mapEl = document.getElementById('liveAuctionMap');

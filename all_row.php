@@ -1,6 +1,11 @@
 <?php
-// session_start();
-include("includes/database.php");
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+include_once("includes/database.php");
+include_once("includes/auth.php");
+
+require_admin("login.php");
 ?>
 
 <!DOCTYPE html>

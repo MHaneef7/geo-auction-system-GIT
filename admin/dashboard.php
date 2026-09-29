@@ -3,12 +3,30 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-include_once __DIR__ . ('/../includes/database.php');
-include_once __DIR__ . ('/../includes/auth.php');
+// Prevent caching of protected admin dashboard
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Cache-Control: post-check=0, pre-check=0", false);
+header("Pragma: no-cache");
+header("Expires: Sat, 26 Jul 1997 05:00:00 GMT");
 
-// require_admin('../index.php');
+// -------------------------------------------------------------
+// SECURE ADMIN SESSION GUARD
+// -------------------------------------------------------------
+$is_admin_authenticated = (
+    (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true) ||
+    (isset($_SESSION['user_id']) && !empty($_SESSION['user_id']) && (
+        (isset($_SESSION['role']) && strtolower($_SESSION['role']) === 'admin') ||
+        (isset($_SESSION['user_role']) && strtolower($_SESSION['user_role']) === 'admin')
+    ))
+);
 
-// Real database statistics (non-prepared procedural queries)
+if (!$is_admin_authenticated) {
+    header("Location: ../index.php");
+    exit();
+}
+
+include_once __DIR__ . '/../includes/database.php';
+include_once __DIR__ . '/../includes/auth.php';
 $total_users_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM users");
 $total_users = ($total_users_res) ? mysqli_fetch_assoc($total_users_res)['c'] : 0;
 
@@ -82,7 +100,7 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
             border: none; 
             border-radius: 12px; 
             box-shadow: 0 4px 6px rgba(0,0,0,0.05); 
-            transition: transform 0.2s ease;
+            transition: transform 0.2s ease;    
         }
         .card-stat:hover {
             transform: translateY(-2px);
@@ -101,7 +119,7 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
     </style>
 </head>
 <body>
-
+    <?php include_once __DIR__ . '/../includes/components/loading_spinner_overlay.php'; ?>
     <div class="sidebar">
         <h3 class="text-center text-white mb-4"><i class="fas fa-gavel me-2"></i>AuctionAdmin</h3>
         <div class="nav-category">Core</div>
@@ -115,25 +133,32 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
         <a href="bids.php"><i class="fas fa-hand-holding-usd me-2"></i> Bids</a>
         
         <div class="nav-category">System</div>
+        <a href="setting.php"><i class="fas fa-database me-2"></i> Database & Backup</a>
         <a href="reports.php"><i class="fas fa-chart-line me-2"></i> Reports</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>
     </div>
-
     <div class="main-content">
         <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
-            <h2 class="fw-bold mb-0" style="color: #111827;">Admin Dashboard Overview</h2>
-            <div class="dropdown">
-                <button class="btn btn-light border dropdown-toggle px-3 py-2" type="button" data-bs-toggle="dropdown">
-                    <i class="fas fa-user-circle me-1 text-success"></i> <?php echo htmlspecialchars($_SESSION['user_name'] ?? 'Administrator'); ?>
-                </button>
-                <ul class="dropdown-menu dropdown-menu-end">
-                    <li><a class="dropdown-item" href="reports.php">Reports</a></li>
-                    <li><hr class="dropdown-divider"></li>
-                    <li><a class="dropdown-item text-danger" href="logout.php">Logout</a></li>
-                </ul>
+            <div>
+                <h2 class="fw-bold mb-1" style="color: #111827;">Admin Dashboard Overview</h2>
+                <p class="text-muted mb-0 small">Real-time marketplace monitoring, inventory and bidding controls</p>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+                <a href="../user/add_items.php" class="btn btn-success px-3 py-2 fw-semibold d-inline-flex align-items-center gap-2 shadow-sm" style="background-color: rgb(4 120 87); border-color: rgb(4 120 87);">
+                    <i class="fas fa-plus-circle"></i> + Add New Item
+                </a>
+                <div class="dropdown">
+                    <button class="btn btn-light border dropdown-toggle px-3 py-2" type="button" data-bs-toggle="dropdown">
+                        <i class="fas fa-user-circle me-1 text-success"></i> <?php echo htmlspecialchars($_SESSION['user_name'] ?? 'Administrator'); ?>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                        <li><a class="dropdown-item" href="reports.php">Reports</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item text-danger" href="logout.php">Logout</a></li>
+                    </ul>
+                </div>
             </div>
         </div>
-
         <div class="row g-4 mb-4">
             <div class="col-md-3">
                 <div class="card card-stat p-3 bg-white">
@@ -236,7 +261,30 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
             </div>
         </div>
     </div>
-
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+    window.addEventListener('pageshow', function (event) {
+        if (event.persisted || (window.performance && window.performance.navigation && window.performance.navigation.type === 2)) {
+            window.location.reload();
+        }
+    });
+
+    // Intercept all logout clicks to display the loading spinner immediately
+    document.addEventListener('click', function(e) {
+        const logoutLink = e.target.closest('a[href*="logout"]');
+        if (logoutLink && !logoutLink.hasAttribute('data-no-loader')) {
+            const targetHref = logoutLink.getAttribute('href');
+            if (targetHref && targetHref !== '#' && !targetHref.startsWith('javascript:')) {
+                e.preventDefault();
+                if (typeof showLoader === 'function') {
+                    showLoader('Logging out, please wait...');
+                }
+                setTimeout(function() {
+                    window.location.href = targetHref;
+                }, 200);
+            }
+        }
+    });
+    </script>
 </body>
 </html>

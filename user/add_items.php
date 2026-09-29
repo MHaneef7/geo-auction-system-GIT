@@ -1,376 +1,939 @@
 <?php
-    if (session_status() === PHP_SESSION_NONE) {
-        session_start();
-    }
-    include_once __DIR__ . '/../includes/database.php';
-    include_once __DIR__ . '/../includes/header.php';
-        $user_id = (int)($_SESSION['user_id'] ?? 0);
-        $msg   = '';
-        $error = '';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add'])) {
-    $title       = trim($_POST['title'] ?? '');
-    $description = trim($_POST['description'] ?? '');
-    $price       = (float)($_POST['starting_price'] ?? 0);
-    $category_id = (int)($_POST['category_id'] ?? 0);
-    $city        = trim($_POST['city'] ?? '');
-    $area        = trim($_POST['area'] ?? '');
-    $start_time  = trim($_POST['start_time'] ?? '');
-    $end_time    = trim($_POST['end_time'] ?? '');
+/**
+ * Add New Auction Item - Geo Auction System
+ *
+ * Handles creation of new auction listings with multiple image uploads,
+ * input validation, secure database insertion, and responsive Bootstrap 5 UI.
+ */
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+require_once __DIR__ . '/../includes/database.php';
+
+// Authentication Check: Ensure user is logged in
+if (!isset($_SESSION['user_id'])) {
+    header("Location: ../login.php?redirect=user/add_items.php");
+    exit();
+}
+
+$user_id   = (int)$_SESSION['user_id'];
+$user_role = strtolower($_SESSION['role'] ?? $_SESSION['user_role'] ?? 'seller');
+
+$error_msg   = '';
+$success_msg = '';
+
+// Helper function to generate URL-safe slugs
+function generate_slug($text) {
+    $text = preg_replace('~[^\pL\d]+~u', '-', $text);
+    $text = iconv('utf-8', 'us-ascii//TRANSLIT', $text);
+    $text = preg_replace('~[^-\w]+~', '', $text);
+    $text = trim($text, '-');
+    $text = preg_replace('~-+~', '-', $text);
+    $text = strtolower($text);
+    return empty($text) ? 'auction-item-' . time() : $text . '-' . substr(uniqid(), -4);
+}
+
+// -------------------------------------------------------------
+// POST Request Handling: Process New Auction Item Submission
+// -------------------------------------------------------------
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_item'])) {
+    // 1. Sanitize text inputs
+    $title         = trim($_POST['title'] ?? '');
+    $category_id   = (int)($_POST['category_id'] ?? 0);
+    $description   = trim($_POST['description'] ?? '');
+    $starting_bid  = (float)($_POST['starting_bid'] ?? 0);
+    $reserve_price = !empty($_POST['reserve_price']) ? (float)$_POST['reserve_price'] : null;
+    $min_increment = !empty($_POST['min_increment']) ? (float)$_POST['min_increment'] : 100.00;
+    $city          = trim($_POST['city'] ?? '');
+    $area          = trim($_POST['area'] ?? '');
+    $start_time    = trim($_POST['start_time'] ?? '');
+    $end_time      = trim($_POST['end_time'] ?? '');
+
+    // 2. Validate Required Fields
     if ($title === '') {
-        $error = 'Please enter item title.';
+        $error_msg = 'Please enter an item title.';
+    } elseif (mb_strlen($title) < 5 || mb_strlen($title) > 255) {
+        $error_msg = 'Title must be between 5 and 255 characters.';
+    } elseif ($category_id <= 0) {
+        $error_msg = 'Please select a valid auction category.';
     } elseif ($description === '') {
-        $error = 'Please enter item description.';
-    } elseif ($price <= 0) {
-        $error = 'Please enter a valid starting price in PKR.';
+        $error_msg = 'Please provide a detailed item description.';
+    } elseif ($starting_bid <= 0) {
+        $error_msg = 'Starting bid price must be greater than zero (PKR).';
+    } elseif ($reserve_price !== null && $reserve_price < $starting_bid) {
+        $error_msg = 'Reserve price cannot be lower than the starting bid price.';
+    } elseif ($min_increment <= 0) {
+        $error_msg = 'Bid increment step must be greater than zero.';
     } elseif ($city === '' || $area === '') {
-        $error = 'Please provide city and area location details.';
+        $error_msg = 'Please provide both city and area for item location.';
     } elseif ($start_time === '' || $end_time === '') {
-        $error = 'Please select both start and end times.';
+        $error_msg = 'Please specify both auction start and end dates/times.';
     } else {
-        $uploaded_images = [];
-        if (isset($_FILES['item_images']) && !empty($_FILES['item_images']['name'][0])) {
+        // 3. Date & Time Validation
+        $start_dt = str_replace('T', ' ', $start_time);
+        if (strlen($start_dt) === 16) { $start_dt .= ':00'; }
+
+        $end_dt = str_replace('T', ' ', $end_time);
+        if (strlen($end_dt) === 16) { $end_dt .= ':00'; }
+
+        $start_ts = strtotime($start_dt);
+        $end_ts   = strtotime($end_dt);
+
+        if ($start_ts === false || $end_ts === false) {
+            $error_msg = 'Invalid date/time format provided.';
+        } elseif ($end_ts <= $start_ts) {
+            $error_msg = 'Auction end date/time must be strictly after the start date/time.';
+        } elseif ($end_ts <= time()) {
+            $error_msg = 'Auction end date/time must be in the future.';
+        }
+    }
+
+    // 4. File Upload & Image Validation
+    $uploaded_images = [];
+    $raw_upload_paths = [];
+
+    if ($error_msg === '') {
+        if (!isset($_FILES['item_images']) || empty($_FILES['item_images']['name'][0])) {
+            $error_msg = 'Please upload at least one image of the auction item.';
+        } else {
             $files = $_FILES['item_images'];
             $file_count = count($files['name']);
-            if ($file_count > 3) {
-                $error = 'You can upload a maximum of 3 images.';
+
+            if ($file_count > 5) {
+                $error_msg = 'You can upload a maximum of 5 images.';
             } else {
                 $upload_dir = __DIR__ . '/../uploads/items/';
                 if (!is_dir($upload_dir)) {
                     mkdir($upload_dir, 0755, true);
                 }
+
+                $allowed_mimes = ['image/jpeg', 'image/png', 'image/webp'];
+                $allowed_exts  = ['jpg', 'jpeg', 'png', 'webp'];
+
                 for ($i = 0; $i < $file_count; $i++) {
                     if ($files['error'][$i] === UPLOAD_ERR_OK) {
-                        $file_tmp  = $files['tmp_name'][$i];
-                        $file_name = $files['name'][$i];
+                        $tmp_name = $files['tmp_name'][$i];
+                        $orig_name = $files['name'][$i];
                         $file_size = $files['size'][$i];
-                        $allowed_types = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-                        $file_mime = mime_content_type($file_tmp);
-                        if (!in_array($file_mime, $allowed_types)) {
-                            $error = 'Invalid image format for file: ' . htmlspecialchars($file_name) . '. Only JPG, PNG, and WEBP are allowed.';
+                        $file_ext  = strtolower(pathinfo($orig_name, PATHINFO_EXTENSION));
+
+                        // Check MIME type with mime_content_type
+                        $mime_type = mime_content_type($tmp_name);
+
+                        if (!in_array($mime_type, $allowed_mimes) || !in_array($file_ext, $allowed_exts)) {
+                            $error_msg = 'Invalid image format for file: ' . htmlspecialchars($orig_name) . '. Only JPG, PNG, and WEBP are allowed.';
                             break;
-                        } elseif ($file_size > 5 * 1024 * 1024) { 
-                            $error = 'Image size exceeds 5MB limit for file: ' . htmlspecialchars($file_name);
+                        } elseif ($file_size > 5 * 1024 * 1024) { // 5MB limit
+                            $error_msg = 'File size exceeds 5MB limit for: ' . htmlspecialchars($orig_name);
                             break;
                         } else {
-                            $file_ext = pathinfo($file_name, PATHINFO_EXTENSION);
-                            $new_filename = 'item_' . time() . '_' . mt_rand(1000, 9999) . '_' . $i . '.' . $file_ext;
-                            $destination = $upload_dir . $new_filename;
-                            if (move_uploaded_file($file_tmp, $destination)) {
-                                $uploaded_images[] = 'uploads/items/' . $new_filename;
+                            $unique_filename = 'item_' . time() . '_' . bin2hex(random_bytes(4)) . '_' . $i . '.' . $file_ext;
+                            $target_filepath = $upload_dir . $unique_filename;
+
+                            if (move_uploaded_file($tmp_name, $target_filepath)) {
+                                $uploaded_images[] = 'uploads/items/' . $unique_filename;
+                                $raw_upload_paths[] = $target_filepath;
                             } else {
-                                $error = 'Failed to move uploaded image file: ' . htmlspecialchars($file_name);
+                                $error_msg = 'Failed to save uploaded image: ' . htmlspecialchars($orig_name);
                                 break;
                             }
                         }
                     } elseif ($files['error'][$i] !== UPLOAD_ERR_NO_FILE) {
-                        $error = 'Error uploading file: ' . htmlspecialchars($files['name'][$i]);
+                        $error_msg = 'Error uploading file: ' . htmlspecialchars($files['name'][$i]);
                         break;
                     }
+                }
+
+                if ($error_msg === '' && empty($uploaded_images)) {
+                    $error_msg = 'Please upload at least one valid item image.';
+                }
+            }
+        }
+    }
+
+    // 5. Database Insertion with Prepared Statements and Transaction
+    if ($error_msg === '') {
+        // Generate unique Auction Code
+        do {
+            $auction_code = 'AUC-' . strtoupper(substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ23456789'), 0, 6));
+            $chk_stmt = mysqli_prepare($conn, "SELECT id FROM items WHERE auction_code = ? LIMIT 1");
+            mysqli_stmt_bind_param($chk_stmt, "s", $auction_code);
+            mysqli_stmt_execute($chk_stmt);
+            $code_exists = mysqli_stmt_fetch($chk_stmt);
+            mysqli_stmt_close($chk_stmt);
+        } while ($code_exists);
+
+        // Generate Slug
+        $slug = generate_slug($title);
+        $slug_chk = mysqli_prepare($conn, "SELECT id FROM items WHERE slug = ? LIMIT 1");
+        mysqli_stmt_bind_param($slug_chk, "s", $slug);
+        mysqli_stmt_execute($slug_chk);
+        if (mysqli_stmt_fetch($slug_chk)) {
+            $slug .= '-' . time();
+        }
+        mysqli_stmt_close($slug_chk);
+
+        $featured_image = $uploaded_images[0] ?? '';
+        $images_json    = json_encode($uploaded_images);
+        $status         = 'active';
+        $approved       = 1;
+
+        // Start Transaction
+        mysqli_begin_transaction($conn);
+
+        $insert_sql = "
+            INSERT INTO items (
+                auction_code,
+                title,
+                slug,
+                description,
+                starting_price,
+                reserve_price,
+                current_price,
+                min_increment,
+                seller_id,
+                category_id,
+                city,
+                area,
+                featured_image,
+                images,
+                status,
+                approved,
+                start_time,
+                end_time,
+                created_at,
+                updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW()
+            )
+        ";
+
+        $stmt = mysqli_prepare($conn, $insert_sql);
+        if ($stmt) {
+            mysqli_stmt_bind_param(
+                $stmt,
+                "ssssddddiisssssiss",
+                $auction_code,
+                $title,
+                $slug,
+                $description,
+                $starting_bid,
+                $reserve_price,
+                $starting_bid, // Initial current_price equals starting_bid
+                $min_increment,
+                $user_id,
+                $category_id,
+                $city,
+                $area,
+                $featured_image,
+                $images_json,
+                $status,
+                $approved,
+                $start_dt,
+                $end_dt
+            );
+
+            if (mysqli_stmt_execute($stmt)) {
+                $new_item_id = mysqli_insert_id($conn);
+                mysqli_stmt_close($stmt);
+
+                // Insert into item_images table
+                $img_sql = "INSERT INTO item_images (item_id, image_path, is_primary, created_at) VALUES (?, ?, ?, NOW())";
+                $img_stmt = mysqli_prepare($conn, $img_sql);
+
+                if ($img_stmt) {
+                    foreach ($uploaded_images as $idx => $img_path) {
+                        $is_primary = ($idx === 0) ? 1 : 0;
+                        mysqli_stmt_bind_param($img_stmt, "isi", $new_item_id, $img_path, $is_primary);
+                        mysqli_stmt_execute($img_stmt);
+                    }
+                    mysqli_stmt_close($img_stmt);
+                }
+
+                // Commit Transaction
+                mysqli_commit($conn);
+
+                $success_msg = "Auction item published successfully! Auction Code: " . $auction_code;
+                // Reset form values on success
+                $_POST = [];
+            } else {
+                mysqli_rollback($conn);
+                $error_msg = "Database execute error: " . mysqli_stmt_error($stmt);
+                mysqli_stmt_close($stmt);
+                // Clean up newly uploaded files on error
+                foreach ($raw_upload_paths as $file_path) {
+                    if (file_exists($file_path)) { @unlink($file_path); }
                 }
             }
         } else {
-            $error = 'Please upload at least one item image.';
+            mysqli_rollback($conn);
+            $error_msg = "Database prepare error: " . mysqli_error($conn);
+            foreach ($raw_upload_paths as $file_path) {
+                if (file_exists($file_path)) { @unlink($file_path); }
+            }
         }
-        if ($error === '') {
-            $start_time_mysql = str_replace('T', ' ', $start_time);
-            if (strlen($start_time_mysql) === 16) {
-                $start_time_mysql .= ':00';
-            }
-            $end_time_mysql = str_replace('T', ' ', $end_time);
-            if (strlen($end_time_mysql) === 16) {
-                $end_time_mysql .= ':00';
-            }
-            $start_timestamp = strtotime($start_time_mysql);
-            $end_timestamp   = strtotime($end_time_mysql);
-
-            if ($start_timestamp === false || $end_timestamp === false) {
-                $error = 'Invalid start or end time format.';
-            } elseif ($end_timestamp <= $start_timestamp) {
-                $error = 'Auction end time must be after the start time.';
-            } else {
-                do{
-                    $auction_code = 'GA-' . strtoupper(
-                        substr(
-                            str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ23456789'),
-                            0,6
-                        )
-                    );
-
-                    $check_sql = "SELECT id FROM items WHERE auction_code = ? LIMIT 1";
-                    $check_stmt = mysqli_prepare($conn, $check_sql);
-
-                    if (!$check_stmt) {
-                        $error = 'Database error: ' . mysqli_error($conn);
-                        break;
-                    }
-
-                    mysqli_stmt_bind_param($check_stmt, "s", $auction_code);
-                    mysqli_stmt_execute($check_stmt);
-                    $check_result = mysqli_stmt_get_result($check_stmt);
-                    $code_exists = mysqli_num_rows($check_result) > 0;
-                    mysqli_stmt_close($check_stmt);
-
-                } while ($code_exists);
-
-                if ($error === '') {
-                    $min_increment = 1.00;
-                    $featured_image_path = $uploaded_images[0] ?? null; 
-                    $images_json = json_encode($uploaded_images);
-                    $sql = "
-                        INSERT INTO items
-                        (
-                            auction_code,
-                            title,
-                            description,
-                            starting_price,
-                            current_price,
-                            min_increment,
-                            seller_id,
-                            category_id,
-                            city,
-                            area,
-                            featured_image,
-                            images,
-                            status,
-                            approved,
-                            start_time,
-                            end_time,
-                            created_at,
-                            updated_at
-                        )
-                        VALUES
-                        (
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?, NOW(), NOW()
-                        )
-                    ";
-
-                    $stmt = mysqli_prepare($conn, $sql);
-
-                    if (!$stmt) {
-                        $error = 'Database prepare error: ' . mysqli_error($conn);
-                    } else {
-                        mysqli_stmt_bind_param(
-                            $stmt,
-                            "sssdddiissssss",
-                            $auction_code,
-                            $title,
-                            $description,
-                            $price,
-                            $price,
-                            $min_increment,
-                            $user_id,
-                            $category_id,
-                            $city,
-                            $area,
-                            $featured_image_path,
-                            $images_json,
-                            $start_time_mysql,
-                            $end_time_mysql
-                        );
-                        if (mysqli_stmt_execute($stmt)) {
-                            $new_item_id = mysqli_insert_id($conn);
-                            mysqli_stmt_close($stmt);
-
-                            foreach ($uploaded_images as $index => $img_path) {
-                                $is_primary = ($index === 0) ? 1 : 0;
-
-                                $img_sql = "INSERT INTO item_images (item_id, image_path, is_primary, created_at) VALUES (?, ?, ?, NOW())";
-                                $img_stmt = mysqli_prepare($conn, $img_sql);
-                                if ($img_stmt) {
-                                    mysqli_stmt_bind_param($img_stmt, "isi", $new_item_id, $img_path, $is_primary);
-                                    mysqli_stmt_execute($img_stmt);
-                                    mysqli_stmt_close($img_stmt);
-                                }
-                            }
-
-                            $msg = "Auction item published successfully! Auction Code: " . $auction_code;
-                            $_POST = [];
-                        } else {
-                            $error = 'Failed to add item: ' . mysqli_stmt_error($stmt);
-                            mysqli_stmt_close($stmt);
-                        }
-                    }
-                }
-            }
+    } else {
+        // Validation error: Remove any moved images
+        foreach ($raw_upload_paths as $file_path) {
+            if (file_exists($file_path)) { @unlink($file_path); }
         }
     }
 }
 
-$categories = mysqli_query(
-    $conn,
-    "SELECT id, name FROM categories ORDER BY name ASC"
-);
+// Fetch categories for select dropdown
+$categories_res = mysqli_query($conn, "SELECT id, name FROM categories ORDER BY name ASC");
+
+// Default dates for form
+$default_start = date('Y-m-d\TH:i', strtotime('+5 minutes'));
+$default_end   = date('Y-m-d\TH:i', strtotime('+7 days'));
+
+include_once __DIR__ . '/../includes/header.php';
 ?>
 
-<div style="text-align: center; margin: 40px 0;">
-    <button type="button" onclick="openAuctionModal()" style="background: linear-gradient(135deg, #009940 0%, #007a33 100%); color: #ffffff; border: none; padding: 14px 28px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 15px; box-shadow: 0 4px 12px rgba(0, 122, 51, 0.25);">
-        <i class="fa-solid fa-gavel"></i> Create Auction
-    </button>
-</div>
+<!-- Ensure Bootstrap 5, Bootstrap Icons & FontAwesome are loaded for icons and layout -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 
-<div id="auctionModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); z-index: 1000; overflow-y: auto; padding: 20px; box-sizing: border-box;">
+<style>
+/* Layout protection against Bootstrap 5 overrides */
+.navbar {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    height: 64px !important;
+    min-height: 64px !important;
+    max-height: 64px !important;
+    display: flex !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+    margin: 0 !important;
+    padding: 0 24px !important;
+    z-index: 1000 !important;
+}
+.layout {
+    display: flex !important;
+    margin-top: 64px !important;
+}
+.sidebar {
+    position: fixed !important;
+    top: 64px !important;
+    left: 0 !important;
+    width: 250px !important;
+    height: calc(100vh - 64px) !important;
+    z-index: 100 !important;
+}
+.main-content {
+    margin-left: 250px !important;
+    padding: 24px !important;
+}
+@media (max-width: 992px) {
+    .main-content { margin-left: 0 !important; }
+}
 
-    <div style="max-width: 750px; margin: 30px auto; background: #ffffff; padding: 35px; border-radius: 14px; border: 1px solid #e2e8f0; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1); font-family: 'Inter', sans-serif; position: relative;">
+.back-to-auctions-btn {
+    transition: all 0.2s ease;
+    border-color: #cbd5e1;
+    color: #475569;
+}
+.back-to-auctions-btn:hover {
+    background-color: #f1f5f9;
+    border-color: #047857;
+    color: #047857;
+    transform: translateX(-3px);
+}
 
-        <button type="button" onclick="closeAuctionModal()" style="position: absolute; top: 20px; right: 20px; background: #f1f5f9; border: none; width: 36px; height: 36px; border-radius: 50%; font-size: 18px; cursor: pointer; color: #334155; font-weight: bold;">&times;</button>
+/* Modal Overlay & Styling */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  backdrop-filter: blur(2px);
+  padding: 1rem;
+  box-sizing: border-box;
+}
 
-        <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 30px; border-bottom: 1px solid #f1f5f9; padding-bottom: 20px;">
-            <div style="width: 52px; height: 52px; background: linear-gradient(135deg, #009940 0%, #007a33 100%); color: #ffffff; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0, 122, 51, 0.2);">
-                <i class="fa-solid fa-gavel"></i>
-            </div>
-            <div>
-                <h2 style="font-size: 24px; font-weight: 800; color: #0f172a; margin: 0; letter-spacing: -0.5px;">Add New Auction Item</h2>
-                <p style="margin: 6px 0 0; color: #64748b; font-size: 14px;">Fill in the details below to publish your item live for bidding.</p>
-            </div>
+.modal-overlay.hidden {
+  display: none !important;
+}
+
+.modal-box {
+  background: #ffffff;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 420px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  animation: popIn 0.2s ease-out;
+}
+
+@keyframes popIn {
+  from { transform: scale(0.92); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.modal-header {
+  padding: 16px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #1f2937;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.close-x {
+  background: none;
+  border: none;
+  font-size: 22px;
+  cursor: pointer;
+  color: #666;
+  line-height: 1;
+  padding: 0;
+}
+
+.close-x:hover {
+  color: #111;
+}
+
+.modal-body {
+  padding: 20px;
+  color: #444;
+  line-height: 1.5;
+  font-size: 0.95rem;
+}
+
+.modal-body p {
+  margin: 0;
+}
+
+.modal-footer {
+  padding: 12px 20px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  background: #fafafa;
+  border-top: 1px solid #f0f0f0;
+}
+
+.modal-footer .btn,
+.btn.primary,
+.btn.secondary {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  font-size: 0.875rem;
+  transition: all 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+
+.btn.primary { background: #047857; color: #fff; }
+.btn.primary:hover { background: #065f46; color: #fff; }
+.btn.secondary { background: #e5e7eb; color: #374151; }
+.btn.secondary:hover { background: #d1d5db; color: #1f2937; }
+</style>
+
+<div class="container py-4" style="max-width: 960px;">
+    <!-- Breadcrumb & Header -->
+    <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+        <div>
+            <h1 class="h3 fw-bold text-dark mb-0">
+                <i class="fa-solid fa-circle-plus text-success me-2"></i>Create New Auction Listing
+            </h1>
+            <p class="text-muted small mb-0">Fill in the specifications, pricing, and upload images to publish your auction item.</p>
         </div>
+        <div>
+            <a href="my_auctions.php" class="btn btn-outline-secondary back-to-auctions-btn d-inline-flex align-items-center gap-2 shadow-sm px-3 py-2 rounded-3 text-decoration-none">
+                <i class="fa-solid fa-arrow-left"></i>
+                <span class="fw-semibold">Back to My Auctions</span>
+            </a>
+        </div>
+    </div>
 
-        <?php if ($msg !== ''): ?>
-            <div style="background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; padding: 14px 18px; border-radius: 8px; margin-bottom: 24px; font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 10px;">
-                <i class="fa-solid fa-circle-check" style="font-size: 16px;"></i> <span><?php echo htmlspecialchars($msg); ?></span>
-            </div>
-        <?php endif; ?>
-
-        <?php if ($error !== ''): ?>
-            <div style="background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; padding: 14px 18px; border-radius: 8px; margin-bottom: 24px; font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 10px;">
-                <i class="fa-solid fa-circle-exclamation" style="font-size: 16px;"></i> <span><?php echo htmlspecialchars($error); ?></span>
-            </div>
-        <?php endif; ?>
-
-        <form method="POST" action="" enctype="multipart/form-data">
-
-            <div style="margin-bottom: 20px;">
-                <label style="display: block; font-weight: 600; color: #334155; margin-bottom: 8px; font-size: 14px;">Item Title <span style="color: #ef4444;">*</span></label>
-                <input type="text" name="title" value="<?php echo htmlspecialchars($_POST['title'] ?? ''); ?>" required placeholder="e.g. Vintage Rolex Submariner Watch" style="width: 100%; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 14px; color: #0f172a;">
-            </div>
-
-            <div style="margin-bottom: 20px;">
-                <label style="display: block; font-weight: 600; color: #334155; margin-bottom: 8px; font-size: 14px;">Category <span style="color: #ef4444;">*</span></label>
-                <select name="category_id" required style="width: 100%; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; background: #ffffff; font-size: 14px; color: #0f172a;">
-                    <option value="">-- Select Category --</option>
-                    <?php if ($categories): ?>
-                        <?php while ($cat = mysqli_fetch_assoc($categories)): ?>
-                            <option value="<?php echo (int)$cat['id']; ?>" <?php echo ((int)($_POST['category_id'] ?? 0) === (int)$cat['id']) ? 'selected' : ''; ?>>
-                                <?php echo htmlspecialchars($cat['name']); ?>
-                            </option>
-                        <?php endwhile; ?>
-                    <?php endif; ?>
-                </select>
-            </div>
-
-            <div style="margin-bottom: 20px;">
-                <label style="display: block; font-weight: 600; color: #334155; margin-bottom: 8px; font-size: 14px;">Starting Price (PKR) <span style="color: #ef4444;">*</span></label>
-                <div style="position: relative;">
-                    <span style="position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: #64748b; font-weight: 600; font-size: 14px;">Rs.</span>
-                    <input type="number" step="0.01" min="1" name="starting_price" value="<?php echo htmlspecialchars($_POST['starting_price'] ?? ''); ?>" required placeholder="0.00" style="width: 100%; padding: 12px 16px 12px 45px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 14px; color: #0f172a;">
+    <!-- Feedback Alerts -->
+    <?php if ($success_msg !== ''): ?>
+        <div class="alert alert-success alert-dismissible fade show d-flex align-items-center gap-3 shadow-sm border-0 mb-4" role="alert" style="background-color: #ecfdf5; border-left: 5px solid #10b981 !important; color: #065f46;">
+            <i class="bi bi-check-circle-fill fs-4 text-success"></i>
+            <div>
+                <strong class="d-block">Success!</strong>
+                <span><?php echo htmlspecialchars($success_msg); ?></span>
+                <div class="mt-2">
+                    <a href="my_auctions.php" class="btn btn-sm btn-success fw-semibold me-2">View My Listings</a>
+                    <a href="add_items.php" class="btn btn-sm btn-outline-success">Add Another Item</a>
                 </div>
             </div>
+            <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>
+    <?php endif; ?>
 
-            <div style="margin-bottom: 20px;">
-                <label style="display: block; font-weight: 600; color: #334155; margin-bottom: 8px; font-size: 14px;">Description <span style="color: #ef4444;">*</span></label>
-                <textarea name="description" required rows="4" placeholder="Provide complete specifications, model details, and condition..." style="width: 100%; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; resize: vertical; font-size: 14px; color: #0f172a;"><?php echo htmlspecialchars($_POST['description'] ?? ''); ?></textarea>
+    <?php if ($error_msg !== ''): ?>
+        <div class="alert alert-danger alert-dismissible fade show d-flex align-items-center gap-3 shadow-sm border-0 mb-4" role="alert" style="background-color: #fef2f2; border-left: 5px solid #ef4444 !important; color: #991b1b;">
+            <i class="bi bi-exclamation-octagon-fill fs-4 text-danger"></i>
+            <div>
+                <strong class="d-block">Error encountered:</strong>
+                <span><?php echo htmlspecialchars($error_msg); ?></span>
             </div>
-            <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
-                <h3 style="font-size: 15px; font-weight: 700; color: #334155; margin-top: 0; margin-bottom: 15px;"><i class="fa-solid fa-location-dot"></i> Location Information</h3>
+            <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>
+    <?php endif; ?>
+
+    <!-- Main Form Card -->
+    <div class="card border-0 shadow-sm rounded-3">
+        <div class="card-body p-4 p-md-5">
+            <form method="POST" action="" enctype="multipart/form-data" novalidate id="auctionForm">
                 
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
-                    <div>
-                        <label style="display: block; font-weight: 600; color: #334155; margin-bottom: 6px; font-size: 13px;">City <span style="color: #ef4444;">*</span></label>
-                        <input type="text" name="city" value="<?php echo htmlspecialchars($_POST['city'] ?? ''); ?>" required placeholder="e.g. Karachi" style="width: 100%; padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; background: #fff;">
+                <!-- Section 1: Item Basic Information -->
+                <div class="mb-4">
+                    <h5 class="fw-bold text-dark border-bottom pb-2 mb-3">
+                        <i class="bi bi-info-circle text-primary me-2"></i>Item Information
+                    </h5>
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            <label for="itemTitle" class="form-label fw-semibold text-secondary small">
+                                Item Title <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" 
+                                   class="form-control form-control-lg" 
+                                   id="itemTitle" 
+                                   name="title" 
+                                   value="<?php echo htmlspecialchars($_POST['title'] ?? ''); ?>" 
+                                   placeholder="e.g., Vintage Rolex Submariner 1985" 
+                                   required>
+                            <div class="form-text">Include key brand, model, and year details for better discoverability.</div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label for="itemCategory" class="form-label fw-semibold text-secondary small">
+                                Category <span class="text-danger">*</span>
+                            </label>
+                            <select class="form-select form-select-lg" id="itemCategory" name="category_id" required>
+                                <option value="">-- Select Category --</option>
+                                <?php if ($categories_res): ?>
+                                    <?php while ($cat = mysqli_fetch_assoc($categories_res)): ?>
+                                        <option value="<?php echo (int)$cat['id']; ?>" <?php echo ((int)($_POST['category_id'] ?? 0) === (int)$cat['id']) ? 'selected' : ''; ?>>
+                                            <?php echo htmlspecialchars($cat['name']); ?>
+                                        </option>
+                                    <?php endwhile; ?>
+                                <?php endif; ?>
+                            </select>
+                        </div>
+
+                        <div class="col-12">
+                            <label for="itemDescription" class="form-label fw-semibold text-secondary small">
+                                Full Description <span class="text-danger">*</span>
+                            </label>
+                            <textarea class="form-control" 
+                                      id="itemDescription" 
+                                      name="description" 
+                                      rows="5" 
+                                      placeholder="Provide comprehensive details: physical condition, dimensions, specifications, flaws, and warranty/accessories included..." 
+                                      required><?php echo htmlspecialchars($_POST['description'] ?? ''); ?></textarea>
+                        </div>
                     </div>
-                    <div>
-                        <label style="display: block; font-weight: 600; color: #334155; margin-bottom: 6px; font-size: 13px;">Area <span style="color: #ef4444;">*</span></label>
-                        <input type="text" name="area" value="<?php echo htmlspecialchars($_POST['area'] ?? ''); ?>" required placeholder="e.g. Clifton" style="width: 100%; padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; background: #fff;">
+                </div>
+
+                <!-- Section 2: Pricing & Bidding Rules -->
+                <div class="mb-4">
+                    <h5 class="fw-bold text-dark border-bottom pb-2 mb-3">
+                        <i class="bi bi-tag text-success me-2"></i>Pricing & Bidding Settings
+                    </h5>
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label for="startingBid" class="form-label fw-semibold text-secondary small">
+                                Starting Bid (PKR) <span class="text-danger">*</span>
+                            </label>
+                            <div class="input-group">
+                                <span class="input-group-text bg-light fw-bold text-muted">Rs.</span>
+                                <input type="number" 
+                                       step="0.01" 
+                                       min="1" 
+                                       class="form-control" 
+                                       id="startingBid" 
+                                       name="starting_bid" 
+                                       value="<?php echo htmlspecialchars($_POST['starting_bid'] ?? ''); ?>" 
+                                       placeholder="1000.00" 
+                                       required>
+                            </div>
+                            <div class="form-text">The minimum initial opening bid.</div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label for="reservePrice" class="form-label fw-semibold text-secondary small">
+                                Reserve Price (PKR) <span class="text-muted fw-normal">(Optional)</span>
+                            </label>
+                            <div class="input-group">
+                                <span class="input-group-text bg-light fw-bold text-muted">Rs.</span>
+                                <input type="number" 
+                                       step="0.01" 
+                                       min="1" 
+                                       class="form-control" 
+                                       id="reservePrice" 
+                                       name="reserve_price" 
+                                       value="<?php echo htmlspecialchars($_POST['reserve_price'] ?? ''); ?>" 
+                                       placeholder="Leave blank if none">
+                            </div>
+                            <div class="form-text">Lowest price you will accept to sell.</div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label for="minIncrement" class="form-label fw-semibold text-secondary small">
+                                Bid Increment Step (PKR)
+                            </label>
+                            <div class="input-group">
+                                <span class="input-group-text bg-light fw-bold text-muted">Rs.</span>
+                                <input type="number" 
+                                       step="0.01" 
+                                       min="1" 
+                                       class="form-control" 
+                                       id="minIncrement" 
+                                       name="min_increment" 
+                                       value="<?php echo htmlspecialchars($_POST['min_increment'] ?? '100.00'); ?>" 
+                                       placeholder="100.00">
+                            </div>
+                            <div class="form-text">Minimum step each new bid must exceed.</div>
+                        </div>
                     </div>
                 </div>
 
-            </div>
+                <!-- Section 3: Schedule & Timeline -->
+                <div class="mb-4">
+                    <h5 class="fw-bold text-dark border-bottom pb-2 mb-3">
+                        <i class="bi bi-clock-history text-warning me-2"></i>Auction Schedule
+                    </h5>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label for="startTime" class="form-label fw-semibold text-secondary small">
+                                Auction Start Date & Time <span class="text-danger">*</span>
+                            </label>
+                            <input type="datetime-local" 
+                                   class="form-control" 
+                                   id="startTime" 
+                                   name="start_time" 
+                                   value="<?php echo htmlspecialchars($_POST['start_time'] ?? $default_start); ?>" 
+                                   required>
+                            <div class="form-text">Bidding starts automatically at this moment.</div>
+                        </div>
 
-            <div style="margin-bottom: 20px;">
-                <label style="display: block; font-weight: 600; color: #334155; margin-bottom: 8px; font-size: 14px;">Item Images (Upload 2 to 3 images) <span style="color: #ef4444;">*</span></label>
-                <div style="border: 2px dashed #cbd5e1; padding: 20px; border-radius: 8px; background: #f8fafc; text-align: center;">
-                    <input type="file" id="imageInput" name="item_images[]" accept="image/jpeg, image/png, image/webp" multiple required style="width: 100%; font-size: 14px; cursor: pointer;">
-                    <small style="display: block; margin-top: 8px; color: #64748b; font-size: 12px;">Supported formats: JPG, PNG, WEBP (Max size: 5MB per image)</small>
+                        <div class="col-md-6">
+                            <label for="endTime" class="form-label fw-semibold text-secondary small">
+                                Auction End Date & Time <span class="text-danger">*</span>
+                            </label>
+                            <input type="datetime-local" 
+                                   class="form-control" 
+                                   id="endTime" 
+                                   name="end_time" 
+                                   value="<?php echo htmlspecialchars($_POST['end_time'] ?? $default_end); ?>" 
+                                   required>
+                            <div class="form-text">The auction closes and highest bidder wins.</div>
+                        </div>
+                    </div>
                 </div>
-                <div id="imagePreviewContainer" style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px;"></div>
-            </div>
 
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px;">
-                <div>
-                    <label style="display: block; font-weight: 600; color: #334155; margin-bottom: 8px; font-size: 14px;">Start Time <span style="color: #ef4444;">*</span></label>
-                    <input type="datetime-local" name="start_time" value="<?php echo htmlspecialchars($_POST['start_time'] ?? ''); ?>" required style="width: 100%; padding: 11px 16px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 14px; color: #0f172a; background: #fff;">
+                <!-- Section 4: Location Details -->
+                <div class="mb-4">
+                    <h5 class="fw-bold text-dark border-bottom pb-2 mb-3">
+                        <i class="bi bi-geo-alt text-danger me-2"></i>Item Location
+                    </h5>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label for="city" class="form-label fw-semibold text-secondary small">
+                                City <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" 
+                                   class="form-control" 
+                                   id="city" 
+                                   name="city" 
+                                   value="<?php echo htmlspecialchars($_POST['city'] ?? ''); ?>" 
+                                   placeholder="e.g., Karachi, Lahore, Islamabad" 
+                                   required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label for="area" class="form-label fw-semibold text-secondary small">
+                                Area / Neighborhood <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" 
+                                   class="form-control" 
+                                   id="area" 
+                                   name="area" 
+                                   value="<?php echo htmlspecialchars($_POST['area'] ?? ''); ?>" 
+                                   placeholder="e.g., DHA Phase 6, Gulshan, Blue Area" 
+                                   required>
+                        </div>
+                    </div>
                 </div>
-                <div>
-                    <label style="display: block; font-weight: 600; color: #334155; margin-bottom: 8px; font-size: 14px;">Auction End Time <span style="color: #ef4444;">*</span></label>
-                    <input type="datetime-local" name="end_time" value="<?php echo htmlspecialchars($_POST['end_time'] ?? ''); ?>" required style="width: 100%; padding: 11px 16px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 14px; color: #0f172a; background: #fff;">
+
+                <!-- Section 5: Image Uploads -->
+                <div class="mb-4">
+                    <h5 class="fw-bold text-dark border-bottom pb-2 mb-3">
+                        <i class="bi bi-images text-info me-2"></i>Item Images (Up to 5 images) <span class="text-danger">*</span>
+                    </h5>
+                    <div class="p-4 border border-2 border-dashed rounded-3 bg-light text-center" style="border-color: #cbd5e1 !important;">
+                        <i class="bi bi-cloud-arrow-up fs-1 text-muted mb-2 d-block"></i>
+                        <input type="file" 
+                               class="form-control d-none" 
+                               id="itemImagesInput" 
+                               name="item_images[]" 
+                               accept="image/jpeg,image/png,image/webp" 
+                               multiple 
+                               required>
+                        <label for="itemImagesInput" class="btn btn-primary px-4 py-2 shadow-sm" style="cursor: pointer;">
+                            <i class="bi bi-folder2-open me-1"></i> Choose Images
+                        </label>
+                        <p class="text-muted small mt-2 mb-0">
+                            Supported formats: <strong>JPG, PNG, WEBP</strong> &bull; Maximum file size: <strong>5MB per image</strong> &bull; First image will be primary thumbnail
+                        </p>
+                    </div>
+
+                    <!-- Live Image Previews -->
+                    <div id="imagePreviewContainer" class="d-flex flex-wrap gap-3 mt-3"></div>
                 </div>
-            </div>
 
-            <button type="submit" name="add" style="width: 100%; background: linear-gradient(135deg, #009940 0%, #007a33 100%); color: #ffffff; border: none; padding: 14px 24px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 15px; box-shadow: 0 4px 12px rgba(0, 122, 51, 0.25);">
-                <i class="fa-solid fa-gavel"></i> Publish Auction Item
-            </button>
+                <!-- Submission CTA -->
+                <div class="d-grid gap-2 d-md-flex justify-content-md-end pt-3 border-top">
+                    <a href="my_auctions.php" class="btn btn-light px-4 py-2">Cancel</a>
+                    <!-- Trigger Button -->
+                    <button type="submit" name="submit_item" id="createBtn" class="btn btn-success px-5 py-2 fw-semibold shadow-sm d-inline-flex align-items-center gap-2">
+                        <i class="bi bi-check2-circle fs-5"></i>
+                        <span>Create Auction Listing</span>
+                    </button>
+                </div>
 
-        </form>
+            </form>
+        </div>
     </div>
 </div>
 
+<!-- Custom Popup / Modal -->
+<div id="customModal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3 id="customModalTitle">Created Successfully!</h3>
+      <button class="close-x" onclick="closePopup()">&times;</button>
+    </div>
+    <div class="modal-body" id="customModalBody">
+      <p>Aapka naya item kamyabi se create ho chuka hai.</p>
+    </div>
+    <div class="modal-footer" id="customModalFooter">
+      <button class="btn secondary" onclick="closePopup()">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- JavaScript for Live Image Previews, Custom Modal and Create Handling -->
 <script>
-function openAuctionModal() {
-    document.getElementById('auctionModal').style.display = 'block';
-}
+document.addEventListener('DOMContentLoaded', function() {
+    const input = document.getElementById('itemImagesInput');
+    const previewContainer = document.getElementById('imagePreviewContainer');
+    const modal = document.getElementById("customModal");
+    const createBtn = document.getElementById("createBtn");
+    const auctionForm = document.getElementById("auctionForm");
+    let dt = new DataTransfer();
 
-function closeAuctionModal() {
-    document.getElementById('auctionModal').style.display = 'none';
-}
+    // -------------------------------------------------------------
+    // Custom Modal Open & Close Functions
+    // -------------------------------------------------------------
+    window.openPopup = function(title, message, options = {}) {
+        if (!modal) return;
 
-<?php if (!empty($error) || !empty($msg)): ?>
-    window.addEventListener('DOMContentLoaded', () => {
-        openAuctionModal();
-    });
-<?php endif; ?>
+        const titleEl = document.getElementById("customModalTitle");
+        const bodyEl = document.getElementById("customModalBody");
+        const footerEl = document.getElementById("customModalFooter");
 
-let dt = new DataTransfer();
+        if (title && titleEl) titleEl.innerHTML = title;
+        if (message && bodyEl) bodyEl.innerHTML = typeof message === 'string' ? `<p>${message}</p>` : message;
 
-document.getElementById('imageInput').addEventListener('change', function(event) {
-    for (let file of event.target.files) {
-        dt.items.add(file);
-    }
-    this.files = dt.files;
-    renderPreviews();
-});
-
-function renderPreviews() {
-    const container = document.getElementById('imagePreviewContainer');
-    container.innerHTML = '';
-    
-    for (let i = 0; i < dt.files.length; i++) {
-        const file = dt.files[i];
-        
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            const wrapper = document.createElement('div');
-            wrapper.style.cssText = "position: relative; width: 80px; height: 80px; border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; background: #f8fafc; box-shadow: 0 2px 4px rgba(0,0,0,0.05);";
-            
-            const img = document.createElement('img');
-            img.src = e.target.result;
-            img.style.cssText = "width: 100%; height: 100%; object-fit: cover;";
-            
-            const removeBtn = document.createElement('span');
-            removeBtn.innerHTML = '&times;';
-            removeBtn.style.cssText = "position: absolute; top: 4px; right: 4px; background: rgba(15, 23, 42, 0.75); color: white; border-radius: 50%; width: 20px; height: 20px; font-size: 14px; line-height: 18px; text-align: center; cursor: pointer; font-weight: bold;";
-            
-            removeBtn.onclick = function() {
-                dt.items.remove(i);
-                document.getElementById('imageInput').files = dt.files;
-                renderPreviews();
-            };
-            
-            wrapper.appendChild(img);
-            wrapper.appendChild(removeBtn);
-            container.appendChild(wrapper);
+        if (footerEl) {
+            if (options && options.isConfirm) {
+                footerEl.innerHTML = `
+                    <button type="button" class="btn secondary" id="modalCancelBtn">${options.cancelText || 'Cancel'}</button>
+                    <button type="button" class="btn primary" id="modalConfirmBtn">${options.confirmText || 'Confirm'}</button>
+                `;
+                const cancelBtn = document.getElementById("modalCancelBtn");
+                const confirmBtn = document.getElementById("modalConfirmBtn");
+                if (cancelBtn) {
+                    cancelBtn.onclick = () => {
+                        closePopup();
+                        if (typeof options.onCancel === 'function') options.onCancel();
+                    };
+                }
+                if (confirmBtn) {
+                    confirmBtn.onclick = () => {
+                        closePopup();
+                        if (typeof options.onConfirm === 'function') options.onConfirm();
+                    };
+                }
+            } else if (options && (options.okText || options.onConfirm)) {
+                footerEl.innerHTML = `
+                    <button type="button" class="btn primary" id="modalOkBtn">${options.okText || 'OK'}</button>
+                `;
+                const okBtn = document.getElementById("modalOkBtn");
+                if (okBtn) {
+                    okBtn.onclick = () => {
+                        closePopup();
+                        if (typeof options.onConfirm === 'function') options.onConfirm();
+                    };
+                }
+            } else {
+                footerEl.innerHTML = `<button type="button" class="btn secondary" onclick="closePopup()">OK</button>`;
+            }
         }
-        reader.readAsDataURL(file);
+
+        modal.classList.remove("hidden");
+        document.body.style.overflow = "hidden";
+    };
+
+    window.closePopup = function() {
+        if (modal) {
+            modal.classList.add("hidden");
+            document.body.style.overflow = "";
+        }
+    };
+
+    // Click outside modal to close
+    modal.addEventListener("click", (e) => {
+        if (e.target === modal) closePopup();
+    });
+
+    // Close on Escape key
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && modal && !modal.classList.contains("hidden")) {
+            closePopup();
+        }
+    });
+
+    // -------------------------------------------------------------
+    // Image Handling with Custom Modal on Limit Reached
+    // -------------------------------------------------------------
+    input.addEventListener('change', function(e) {
+        // Append new files up to 5 total
+        for (let file of this.files) {
+            if (dt.items.length < 5) {
+                dt.items.add(file);
+            } else {
+                // Replaced default browser alert() with custom modal
+                openPopup("Image Limit Reached", "Maximum 5 images allowed for an auction listing.");
+                break;
+            }
+        }
+        input.files = dt.files;
+        renderThumbnails();
+    });
+
+    function renderThumbnails() {
+        previewContainer.innerHTML = '';
+        if (dt.files.length === 0) return;
+
+        Array.from(dt.files).forEach((file, index) => {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const col = document.createElement('div');
+                col.className = 'position-relative border rounded overflow-hidden shadow-sm bg-white';
+                col.style.width = '100px';
+                col.style.height = '100px';
+
+                const img = document.createElement('img');
+                img.src = e.target.result;
+                img.className = 'w-100 h-100 object-fit-cover';
+                img.alt = file.name;
+
+                // Primary badge for 1st image
+                if (index === 0) {
+                    const badge = document.createElement('span');
+                    badge.className = 'badge bg-success position-absolute bottom-0 start-0 m-1';
+                    badge.style.fontSize = '10px';
+                    badge.innerText = 'Primary';
+                    col.appendChild(badge);
+                }
+
+                // Remove button
+                const removeBtn = document.createElement('button');
+                removeBtn.type = 'button';
+                removeBtn.className = 'btn btn-sm btn-danger position-absolute top-0 end-0 p-0 d-flex align-items-center justify-content-center m-1 rounded-circle';
+                removeBtn.style.width = '20px';
+                removeBtn.style.height = '20px';
+                removeBtn.innerHTML = '&times;';
+                removeBtn.title = 'Remove image';
+                removeBtn.onclick = function() {
+                    dt.items.remove(index);
+                    input.files = dt.files;
+                    renderThumbnails();
+                };
+
+                col.appendChild(img);
+                col.appendChild(removeBtn);
+                previewContainer.appendChild(col);
+            };
+            reader.readAsDataURL(file);
+        });
     }
-}
+
+    // -------------------------------------------------------------
+    // Trigger on Create Action: Replaced default confirm() & alert()
+    // -------------------------------------------------------------
+    if (createBtn && auctionForm) {
+        createBtn.addEventListener("click", function(e) {
+            // Check form validity first
+            if (!auctionForm.checkValidity()) {
+                auctionForm.reportValidity();
+                return;
+            }
+
+            // Require at least one image upload
+            if (dt.files.length === 0) {
+                e.preventDefault();
+                openPopup("Image Required", "Please upload at least one image of the auction item before creating.");
+                return;
+            }
+
+            // Replaced default browser confirm() with custom modal dialog
+            e.preventDefault();
+            openPopup("Confirm Auction Creation", "Are you sure you want to publish this new auction listing?", {
+                isConfirm: true,
+                confirmText: "Yes, Create",
+                onConfirm: function() {
+                    createBtn.disabled = true;
+                    createBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Publishing...';
+                    auctionForm.submit();
+                }
+            });
+        });
+    }
+
+    <?php if (!empty($success_msg)): ?>
+    // Auto-trigger on successful creation
+    openPopup(
+        "Created Successfully!",
+        "Aapka naya item kamyabi se create ho chuka hai.<br><small class=\"text-muted d-block mt-2\"><?= htmlspecialchars($success_msg); ?></small>",
+        {
+            okText: "View My Auctions",
+            onConfirm: function() {
+                window.location.href = "my_auctions.php";
+            }
+        }
+    );
+    <?php endif; ?>
+});
 </script>
 
 <?php

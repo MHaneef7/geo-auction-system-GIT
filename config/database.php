@@ -1,10 +1,4 @@
 <?php
-/**
- * Database Configuration
- * 
- * Geo Auction System - Database connection settings
- */
-
 return [
     'driver' => 'mysql',
     'host' => 'localhost',

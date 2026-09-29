@@ -213,3 +213,403 @@ a:hover { color: var(--primary-dark); }
 ::-webkit-scrollbar-track { background: var(--body-bg); }
 ::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--secondary); }
+
+/* ============================================================
+   Layer 4: Production-Ready Responsive Auction Item Cards
+   ============================================================ */
+
+/* Responsive Catalog Grid for Unified Cards */
+.catalog-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(285px, 100%), 1fr));
+    gap: 24px;
+    margin: 24px 0 40px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Responsive Grid Container */
+.auction-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 24px;
+    margin: 28px 0 48px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+@media (max-width: 1200px) {
+    .auction-grid {
+        grid-template-columns: repeat(3, 1fr);
+        gap: 20px;
+    }
+}
+
+@media (max-width: 900px) {
+    .auction-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 18px;
+    }
+}
+
+@media (max-width: 600px) {
+    .auction-grid {
+        grid-template-columns: 1fr;
+        gap: 16px;
+    }
+}
+
+/* Base Card Styling */
+.auction-card {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 18px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), 
+                box-shadow 0.28s cubic-bezier(0.16, 1, 0.3, 1), 
+                border-color 0.28s ease;
+    position: relative;
+    box-sizing: border-box;
+}
+
+.auction-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 18px 30px -8px rgba(0, 0, 0, 0.12);
+    border-color: #cbd5e1;
+}
+
+/* Image Media Container & Badges */
+.auction-card-media {
+    position: relative;
+    width: 100%;
+    height: 215px;
+    overflow: hidden;
+    background: #0f172a;
+}
+
+.auction-card-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    transition: transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.auction-card:hover .auction-card-img {
+    transform: scale(1.06);
+}
+
+/* "LIVE" Badge */
+.badge-live {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    background: rgba(15, 23, 42, 0.82);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    color: #ffffff;
+    font-size: 10.5px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    z-index: 2;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+}
+
+.badge-live-pulse {
+    width: 7px;
+    height: 7px;
+    background: #ef4444;
+    border-radius: 50%;
+    box-shadow: 0 0 0 rgba(239, 68, 68, 0.7);
+    animation: liveBadgePulse 1.6s infinite;
+}
+
+@keyframes liveBadgePulse {
+    0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.8); }
+    70%  { box-shadow: 0 0 0 7px rgba(239, 68, 68, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* Location Badge */
+.badge-location {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: rgba(15, 23, 42, 0.82);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    z-index: 2;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+}
+
+.badge-location i {
+    color: #10b981;
+}
+
+/* Media Overlay Pictures Count (Matching Reference Photo) */
+.media-overlay-pictures {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0, 0, 0, 0.42);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    color: #ffffff;
+    padding: 6px 14px;
+    border-radius: 24px;
+    font-size: 12.5px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    pointer-events: none;
+    opacity: 0.95;
+    transition: opacity 0.2s ease, background 0.2s ease;
+}
+
+.auction-card:hover .media-overlay-pictures {
+    background: rgba(0, 0, 0, 0.65);
+    opacity: 1;
+}
+
+/* Slide Indicators (Dots) */
+.media-dots-wrap {
+    position: absolute;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    z-index: 2;
+}
+
+.media-dot-item {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.65);
+    transition: all 0.2s ease;
+}
+
+.media-dot-item.active {
+    width: 18px;
+    border-radius: 6px;
+    background: #c91834;
+}
+
+/* Card Body */
+.auction-card-body {
+    padding: 16px 18px 18px;
+    display: flex;
+    flex-direction: column;
+    flex-grow: 1;
+}
+
+/* Meta Top Row: Lot Number & Share Icon */
+.card-meta-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.card-lot-number {
+    font-size: 13px;
+    font-weight: 600;
+    color: #64748b;
+    letter-spacing: 0.2px;
+}
+
+.card-share-btn {
+    background: transparent;
+    border: none;
+    color: #64748b;
+    cursor: pointer;
+    padding: 4px;
+    font-size: 14px;
+    border-radius: 50%;
+    transition: color 0.2s ease, transform 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.card-share-btn:hover {
+    color: #0f172a;
+    transform: scale(1.15);
+}
+
+/* Title (Truncation for Long Names) */
+.card-item-title {
+    font-size: 17px;
+    font-weight: 800;
+    color: #0f172a;
+    margin: 0 0 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-decoration: none;
+    display: block;
+    letter-spacing: -0.3px;
+    line-height: 1.35;
+    transition: color 0.2s ease;
+}
+
+.card-item-title:hover {
+    color: #c91834;
+}
+
+/* Spec Pills Row */
+.card-specs-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.card-spec-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    color: #334155;
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 8px;
+}
+
+.card-spec-pill i {
+    font-size: 12px;
+}
+
+.card-spec-pill.pill-specs i { color: #dc2626; }
+.card-spec-pill.pill-status i { color: #be123c; }
+
+/* Stats Row: Gavel Bids & Dynamic Timer */
+.card-stats-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: #1e293b;
+    padding: 10px 0;
+    border-top: 1px solid #f1f5f9;
+    border-bottom: 1px solid #f1f5f9;
+    margin-bottom: 14px;
+}
+
+.stat-item-box {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.stat-item-box i {
+    color: #334155;
+    font-size: 13px;
+}
+
+.stat-divider {
+    color: #e2e8f0;
+    font-weight: 300;
+}
+
+.stat-timer-val {
+    color: #0f172a;
+    font-feature-settings: "tnum";
+    font-variant-numeric: tabular-nums;
+}
+
+/* Bottom Price Section & Place Bid Button */
+.card-footer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: auto;
+}
+
+.card-price-container {
+    display: flex;
+    flex-direction: column;
+}
+
+.card-price-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.card-price-figure {
+    font-size: 21px;
+    font-weight: 900;
+    color: #0f172a;
+    letter-spacing: -0.6px;
+    line-height: 1.2;
+}
+
+.card-currency-symbol {
+    font-size: 18px;
+    margin-right: 2px;
+}
+
+/* Action Button */
+.btn-place-bid {
+    background: #c91834;
+    color: #ffffff !important;
+    font-size: 13.5px;
+    font-weight: 800;
+    padding: 10px 20px;
+    border-radius: 12px;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(201, 24, 52, 0.28);
+    transition: transform 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+    white-space: nowrap;
+}
+
+.btn-place-bid:hover {
+    background: #a51229;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(201, 24, 52, 0.38);
+}
+
+.btn-place-bid i {
+    font-size: 13px;
+}
+
+/* Full-width option */
+.btn-place-bid-full {
+    width: 100%;
+    margin-top: 10px;
+}
+

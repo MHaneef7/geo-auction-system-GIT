@@ -281,12 +281,102 @@ function initAutoRefresh() {
 }
 
 // ==========================================
-// CONFIRM DIALOG
+// CUSTOM POPUP / MODAL DIALOG (Alert & Confirm Replacement)
 // ==========================================
-function confirmAction(message, callback) {
-    if (confirm(message || 'Are you sure?')) {
-        callback();
+function openPopup(title, message, options = {}) {
+    let modal = document.getElementById("customModal");
+    if (!modal) {
+        modal = document.createElement("div");
+        modal.id = "customModal";
+        modal.className = "modal-overlay hidden";
+        modal.innerHTML = `
+          <div class="modal-box">
+            <div class="modal-header">
+              <h3 id="customModalTitle">Created Successfully!</h3>
+              <button class="close-x" onclick="closePopup()">&times;</button>
+            </div>
+            <div class="modal-body" id="customModalBody">
+              <p>Aapka naya item kamyabi se create ho chuka hai.</p>
+            </div>
+            <div class="modal-footer" id="customModalFooter">
+              <button class="btn secondary" onclick="closePopup()">OK</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+
+        modal.addEventListener("click", (e) => {
+            if (e.target === modal) closePopup();
+        });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && modal && !modal.classList.contains("hidden")) {
+                closePopup();
+            }
+        });
     }
+
+    const titleEl = document.getElementById("customModalTitle");
+    const bodyEl = document.getElementById("customModalBody");
+    const footerEl = document.getElementById("customModalFooter");
+
+    if (title && titleEl) titleEl.innerHTML = title;
+    if (message && bodyEl) bodyEl.innerHTML = typeof message === 'string' ? `<p>${message}</p>` : message;
+
+    if (footerEl) {
+        if (options && options.isConfirm) {
+            footerEl.innerHTML = `
+                <button type="button" class="btn secondary" id="modalCancelBtn">${options.cancelText || 'Cancel'}</button>
+                <button type="button" class="btn primary" id="modalConfirmBtn">${options.confirmText || 'Confirm'}</button>
+            `;
+            const cancelBtn = document.getElementById("modalCancelBtn");
+            const confirmBtn = document.getElementById("modalConfirmBtn");
+            if (cancelBtn) {
+                cancelBtn.onclick = () => {
+                    closePopup();
+                    if (typeof options.onCancel === 'function') options.onCancel();
+                };
+            }
+            if (confirmBtn) {
+                confirmBtn.onclick = () => {
+                    closePopup();
+                    if (typeof options.onConfirm === 'function') options.onConfirm();
+                };
+            }
+        } else if (options && (options.okText || options.onConfirm)) {
+            footerEl.innerHTML = `
+                <button type="button" class="btn primary" id="modalOkBtn">${options.okText || 'OK'}</button>
+            `;
+            const okBtn = document.getElementById("modalOkBtn");
+            if (okBtn) {
+                okBtn.onclick = () => {
+                    closePopup();
+                    if (typeof options.onConfirm === 'function') options.onConfirm();
+                };
+            }
+        } else {
+            footerEl.innerHTML = `<button type="button" class="btn secondary" onclick="closePopup()">OK</button>`;
+        }
+    }
+
+    modal.classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+}
+
+function closePopup() {
+    const modal = document.getElementById("customModal");
+    if (modal) {
+        modal.classList.add("hidden");
+        document.body.style.overflow = "";
+    }
+}
+
+// Replaces default browser confirm() with custom modal
+function confirmAction(message, callback) {
+    openPopup("Please Confirm", message || "Are you sure you want to proceed?", {
+        isConfirm: true,
+        confirmText: "Yes, Proceed",
+        onConfirm: callback
+    });
 }
 
 // ==========================================

@@ -1,4 +1,7 @@
-<?php include_once('includes/header.php'); ?>
+<?php 
+$require_auth = false;
+include_once('includes/header.php'); 
+?>
 
 <div style="background:#fff; padding:32px; border-radius:8px; border:1px solid #e8e8e8; max-width:800px; margin:0 auto;">
     <h1 style="font-size:24px; font-weight:800; color:#1a1a2e; margin-bottom:16px;">About Geo Auction System</h1>

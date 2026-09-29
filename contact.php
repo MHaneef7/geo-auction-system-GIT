@@ -1,4 +1,5 @@
 <?php
+$require_auth = false;
 include_once('includes/header.php');
 
 $msg = '';

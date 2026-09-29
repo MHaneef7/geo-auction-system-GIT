@@ -270,9 +270,9 @@ if (isset($conn) && $conn instanceof mysqli) {
             </p>
         </div>
         <div>
-            <?php if ($user_role === 'seller'): ?>
-                <a href="add_items.php" style="background: #007a33; color: #fff; padding: 10px 18px; border-radius: 6px; text-decoration: none; font-weight: 700; font-size: 14px; display: inline-flex; align-items: center; gap: 8px;">
-                    <i class="fas fa-plus"></i> Add New Item
+            <?php if ($user_role === 'seller' || $user_role === 'admin'): ?>
+                <a href="add_items.php" style="background: rgb(4 120 87); color: #fff; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 14px; display: inline-flex; align-items: center; gap: 8px; box-shadow: 0 4px 12px rgba(4,120,87,0.25); transition: 0.2s ease;">
+                    <i class="fas fa-plus-circle"></i> + Add New Item
                 </a>
             <?php endif; ?>
         </div>
