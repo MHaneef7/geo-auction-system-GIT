@@ -1363,6 +1363,13 @@ $current_user_initial = strtoupper(substr($current_user_name, 0, 1));
                     </div>
                 </div>
 
+                <!-- Lot Discussion & Comments UI Component -->
+                <?php
+                if (file_exists(__DIR__ . '/includes/components/item_comments.php')) {
+                    include __DIR__ . '/includes/components/item_comments.php';
+                }
+                ?>
+
             </div>
 
             <!-- RIGHT COLUMN: LIVE BIDDING TERMINAL & PRICING CONSOLE (5 COLS) -->
