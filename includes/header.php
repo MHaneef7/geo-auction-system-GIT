@@ -562,19 +562,6 @@
                 <button type="submit"><i class="fa-solid fa-magnifying-glass"></i></button>
             </form>
         </div>
-        <div class="nav-location-wrapper">
-            <div class="nav-location-btn" onclick="toggleLocationDropdown(event)">
-                <i class="fa-solid fa-location-dot"></i>
-                <span>Karachi, PK</span>
-                <i class="fa-solid fa-chevron-down" style="font-size: 10px; color: #777;"></i>
-            </div>
-            <div class="location-dropdown-menu" id="locationDropdown">
-                <div class="location-dropdown-item" onclick="selectLocation('Karachi, PK')">Karachi, PK</div>
-                <div class="location-dropdown-item" onclick="selectLocation('Lahore, PK')">Lahore, PK</div>
-                <div class="location-dropdown-item" onclick="selectLocation('Islamabad, PK')">Islamabad, PK</div>
-                <div class="location-dropdown-item" onclick="selectLocation('Peshawar, PK')">Peshawar, PK</div>
-            </div>
-        </div>
         <div class="nav-actions">
             <!-- Theme Toggle Button -->
             <button type="button" class="nav-icon-btn" id="themeToggleBtn" onclick="toggleTheme()" title="Toggle Light / Dark Theme" style="border:none;background:none;cursor:pointer;">
@@ -620,7 +607,7 @@
                             <div style="padding:24px;text-align:center;color:var(--text-muted);font-size:12px;">Loading notifications...</div>
                         </div>
                         <div style="padding:10px 16px;border-top:1px solid var(--border);text-align:center;background:rgba(0,0,0,0.01);">
-                            <a href="<?php echo $user_path; ?>notifications.php" style="font-size:12px;font-weight:700;color:var(--green);text-decoration:none;">
+                            <a href="<?php echo $root_path; ?>notifications.php" style="font-size:12px;font-weight:700;color:var(--green);text-decoration:none;">
                                 View All Notifications →
                             </a>
                         </div>
@@ -671,7 +658,6 @@
                                 <i class="fa-solid fa-user-shield"></i> Admin Panel
                             </a>
                         <?php endif; ?>
-
                         <a href="<?php echo $root_path; ?>logout.php" class="profile-dropdown-item logout">
                             <i class="fa-solid fa-right-from-bracket"></i> Logout
                         </a>
@@ -772,7 +758,6 @@
                 document.getElementById('locationDropdown')?.classList.remove('show');
                 dropdown.classList.toggle('show');
             }
-
             function toggleLocationDropdown(event) {
                 event.stopPropagation();
                 const dropdown = document.getElementById('locationDropdown');
@@ -828,7 +813,6 @@
                                 msgBadge.style.display = 'none';
                             }
                         }
-
                         // Notification Badge
                         const notifBadge = document.getElementById('notificationBadge');
                         if (notifBadge) {
@@ -896,14 +880,18 @@
             }
 
             async function handleNotificationClick(nid, link) {
+                const root = '<?php echo $root_path; ?>';
                 try {
-                    const root = '<?php echo $root_path; ?>';
                     await fetch(root + 'mark_as_read.php?notification_id=' + nid);
                     loadHeaderBadges();
                 } catch (e) {}
 
                 if (link && link.trim() !== '') {
-                    window.location.href = link;
+                    let targetUrl = link.trim();
+                    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://') && !targetUrl.startsWith('/')) {
+                        targetUrl = root + targetUrl;
+                    }
+                    window.location.href = targetUrl;
                 } else {
                     loadHeaderNotifications();
                 }

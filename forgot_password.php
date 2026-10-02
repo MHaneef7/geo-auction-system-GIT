@@ -8,24 +8,32 @@ $message = '';
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email = mysqli_real_escape_string($conn, trim($_POST['email'] ?? ''));
+    $email = trim($_POST['email'] ?? '');
 
     if (!empty($email)) {
-        $sql = "SELECT id FROM users WHERE email = '$email' LIMIT 1";
-        $res = mysqli_query($conn, $sql);
-
-        if ($res && mysqli_num_rows($res) > 0) {
-            $user = mysqli_fetch_assoc($res);
-            $token = bin2hex(random_bytes(32));
-            $token_escaped = mysqli_real_escape_string($conn, $token);
-            $expires = date("Y-m-d H:i:s", strtotime("+1 hour"));
-
-            $update_sql = "UPDATE users SET reset_token = '$token_escaped', reset_token_expires_at = '$expires' WHERE email = '$email'";
-            mysqli_query($conn, $update_sql);
-
-            $message = "If that email exists, a reset link has been generated. <br><br><strong>Testing Reset Link:</strong> <a href='reset_password.php?token=$token'>Reset Password Here</a>";
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $error = "Please enter a valid email address.";
         } else {
-            $message = "If that email exists, a reset link has been generated.";
+            $stmt = mysqli_prepare($conn, "SELECT id FROM users WHERE email = ? LIMIT 1");
+            mysqli_stmt_bind_param($stmt, "s", $email);
+            mysqli_stmt_execute($stmt);
+            $res = mysqli_stmt_get_result($stmt);
+
+            if ($res && mysqli_num_rows($res) > 0) {
+                $user = mysqli_fetch_assoc($res);
+                $token = bin2hex(random_bytes(32));
+                $expires = date("Y-m-d H:i:s", strtotime("+1 hour"));
+
+                $update_stmt = mysqli_prepare($conn, "UPDATE users SET reset_token = ?, reset_token_expires_at = ? WHERE email = ?");
+                mysqli_stmt_bind_param($update_stmt, "sss", $token, $expires, $email);
+                mysqli_stmt_execute($update_stmt);
+                mysqli_stmt_close($update_stmt);
+
+                $message = "If that email exists, a reset link has been generated. <br><br><strong>Testing Reset Link:</strong> <a href='reset_password.php?token=" . urlencode($token) . "'>Reset Password Here</a>";
+            } else {
+                $message = "If that email exists, a reset link has been generated.";
+            }
+            mysqli_stmt_close($stmt);
         }
     } else {
         $error = "Please enter your email address.";

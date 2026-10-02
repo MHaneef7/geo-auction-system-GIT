@@ -665,7 +665,7 @@ if (isset($_GET['edit'])) {
         
         <div class="nav-category">System</div>
         <a href="reports.php"><i class="fas fa-chart-line me-2"></i> Reports</a>
-        <a href="setting.php"><i class="fas fa-sliders-h me-2"></i> Settings</a>
+        <a href="setting.php"><i class="fas fa-database me-2"></i> Database & Backup</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>
     </div>
 

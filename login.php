@@ -1,14 +1,59 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+/**
+ * ============================================================================
+ * File: login.php
+ * Path: /login.php
+ * Description: Secure User & Admin Authentication Gateway
+ * Architecture: Senior PHP Full-Stack Standards (PDO, CSRF, Remember-Me, SweetAlert/Modals)
+ * ============================================================================
+ */
 
-    include_once 'includes/database.php';
-        if (isset($_SESSION['user_id']) || isset($_SESSION['id'])) {
-            $redirect = isset($_GET['redirect']) ? $_GET['redirect'] : 'user/dashboard.php';
-            header("Location: " . $redirect);
+require_once __DIR__ . '/db.php';
+
+$pdo = getDB();
+
+// 1. Auto-login via Remember-Me Cookie (if session not already active)
+if (!isset($_SESSION['user_id']) && !empty($_COOKIE['remember_user'])) {
+    $cookieParts = explode(':', $_COOKIE['remember_user']);
+    if (count($cookieParts) === 2) {
+        [$cookieUid, $cookieToken] = $cookieParts;
+        $cookieStmt = $pdo->prepare("SELECT * FROM users WHERE id = :id AND status = 'active' LIMIT 1");
+        $cookieStmt->execute([':id' => (int)$cookieUid]);
+        $cookieUser = $cookieStmt->fetch();
+
+        if ($cookieUser && !empty($cookieUser['remember_token']) && hash_equals($cookieUser['remember_token'], hash('sha256', $cookieToken))) {
+            $user_role = strtolower(trim($cookieUser['role'] ?? 'buyer'));
+            $_SESSION['user_id']     = (int)$cookieUser['id'];
+            $_SESSION['id']          = (int)$cookieUser['id'];
+            $_SESSION['role']        = $user_role;
+            $_SESSION['user_role']   = $user_role;
+            $_SESSION['name']        = $cookieUser['name'];
+            $_SESSION['user_name']   = $cookieUser['name'];
+            $_SESSION['email']       = $cookieUser['email'];
+            $_SESSION['user_email']  = $cookieUser['email'];
+            $_SESSION['user_phone']  = $cookieUser['phone'] ?? '';
+            $_SESSION['user_avatar'] = $cookieUser['avatar'] ?? '';
+
+            if ($user_role === 'admin') {
+                $_SESSION['admin_logged_in'] = true;
+                $_SESSION['admin_id']        = (int)$cookieUser['id'];
+                $_SESSION['admin_name']      = $cookieUser['name'];
+                $_SESSION['admin_email']     = $cookieUser['email'];
+                header("Location: admin/dashboard.php");
+            } else {
+                header("Location: user/dashboard.php");
+            }
             exit();
         }
+    }
+}
+
+// Redirect if already logged in
+if (isset($_SESSION['user_id']) || isset($_SESSION['id'])) {
+    $redirect = isset($_GET['redirect']) ? $_GET['redirect'] : 'user/dashboard.php';
+    header("Location: " . $redirect);
+    exit();
+}
 
 $alert_type = '';
 $alert_msg  = '';
@@ -20,73 +65,99 @@ if (isset($_GET['logout'])) {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email     = trim($_POST['email'] ?? '');
-    $password  = trim($_POST['password'] ?? '');
-    $email_val = $email;
+    // 2. CSRF Token Verification
+    if (!verify_csrf_token()) {
+        $alert_type = 'error';
+        $alert_msg  = 'Security validation failed (Invalid CSRF Token). Please reload and try again.';
+    } else {
+        $email      = strtolower(trim($_POST['email'] ?? ''));
+        $password   = trim($_POST['password'] ?? '');
+        $rememberMe = isset($_POST['remember']);
+        $email_val  = $email;
 
-    if (!empty($email) && !empty($password)) {
-        // Prepared statement use kiya gaya hai security ke liye
-        $stmt = mysqli_prepare($conn, "SELECT `id`, `name`, `email`, `phone`, `password`, `role`, `avatar`, `bio`, `gender`, `status` FROM users WHERE `email` = ? LIMIT 1");
-        mysqli_stmt_bind_param($stmt, "s", $email);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
+        if (!empty($email) && !empty($password)) {
+            try {
+                // 3. PDO Prepared Statement Authentication
+                $stmt = $pdo->prepare("
+                    SELECT id, name, email, phone, password, role, avatar, bio, gender, status, balance 
+                    FROM users 
+                    WHERE email = :email 
+                    LIMIT 1
+                ");
+                $stmt->execute([':email' => $email]);
+                $user = $stmt->fetch();
 
-        if ($result && mysqli_num_rows($result) > 0) {
-            $user = mysqli_fetch_assoc($result);
-            
-            if (password_verify($password, $user['password'])) {
-                $status = $user['status'] ?? 'active';
-                
-                if ($status == 1 || $status === 'active') {
+                if ($user && password_verify($password, $user['password'])) {
+                    $status = strtolower(trim((string)$user['status']));
 
-                    $user_role = strtolower(trim($user['role'] ?? 'buyer'));
+                    if ($status === '1' || $status === 'active') {
+                        $user_role = strtolower(trim($user['role'] ?? 'buyer'));
 
-                    $_SESSION['user_id']   = (int)$user['id'];
-                    $_SESSION['id']        = (int)$user['id'];
-                    $_SESSION['role']      = $user_role;
-                    $_SESSION['user_role'] = $user_role;
-                    $_SESSION['name']      = $user['name'];
-                    $_SESSION['email']     = $user['email'];
-                    
-                    $_SESSION['user_name']   = $user['name'];
-                    $_SESSION['user_email']  = $user['email'];
-                    $_SESSION['user_phone']  = $user['phone'] ?? '';
-                    $_SESSION['user_avatar'] = $user['avatar'] ?? '';
-                    $_SESSION['user_bio']    = $user['bio'] ?? '';
-                    $_SESSION['user_gender'] = $user['gender'] ?? '';
+                        // 4. Session Variables Initialization
+                        $_SESSION['user_id']     = (int)$user['id'];
+                        $_SESSION['id']          = (int)$user['id'];
+                        $_SESSION['role']        = $user_role;
+                        $_SESSION['user_role']   = $user_role;
+                        $_SESSION['name']        = $user['name'];
+                        $_SESSION['user_name']   = $user['name'];
+                        $_SESSION['email']       = $user['email'];
+                        $_SESSION['user_email']  = $user['email'];
+                        $_SESSION['user_phone']  = $user['phone'] ?? '';
+                        $_SESSION['user_avatar'] = $user['avatar'] ?? '';
+                        $_SESSION['user_bio']    = $user['bio'] ?? '';
+                        $_SESSION['user_gender'] = $user['gender'] ?? '';
 
-                    // If user is admin, set administrative sessions
-                    if ($user_role === 'admin') {
-                        $_SESSION['admin_logged_in'] = true;
-                        $_SESSION['admin_id']        = (int)$user['id'];
-                        $_SESSION['admin_name']      = $user['name'];
-                        $_SESSION['admin_email']     = $user['email'];
-                    }
+                        // Admin privileges
+                        if ($user_role === 'admin') {
+                            $_SESSION['admin_logged_in'] = true;
+                            $_SESSION['admin_id']        = (int)$user['id'];
+                            $_SESSION['admin_name']      = $user['name'];
+                            $_SESSION['admin_email']     = $user['email'];
+                        }
 
-                    // Smart Redirection: Admins go to admin/dashboard.php unless an explicit redirect was requested
-                    if ($user_role === 'admin' && empty($_POST['redirect'])) {
-                        $redirect = 'admin/dashboard.php';
+                        // 5. Remember-Me Token Persistence
+                        if ($rememberMe) {
+                            $rawToken = bin2hex(random_bytes(32));
+                            $hashedToken = hash('sha256', $rawToken);
+                            $upToken = $pdo->prepare("UPDATE users SET remember_token = :token WHERE id = :id");
+                            $upToken->execute([':token' => $hashedToken, ':id' => $user['id']]);
+
+                            $cookieValue = $user['id'] . ':' . $rawToken;
+                            setcookie('remember_user', $cookieValue, [
+                                'expires'  => time() + (86400 * 30), // 30 days
+                                'path'     => '/',
+                                'httponly' => true,
+                                'samesite' => 'Lax'
+                            ]);
+                        }
+
+                        // Smart Redirection
+                        if ($user_role === 'admin' && empty($_POST['redirect'])) {
+                            $redirect = 'admin/dashboard.php';
+                        } else {
+                            $redirect = !empty($_POST['redirect']) ? $_POST['redirect'] : 'user/dashboard.php';
+                        }
+
+                        header("Location: " . $redirect);
+                        exit();
+
                     } else {
-                        $redirect = isset($_POST['redirect']) && !empty($_POST['redirect']) ? $_POST['redirect'] : 'user/dashboard.php';
+                        $alert_type = 'error';
+                        $alert_msg  = 'Your account is suspended. Please contact customer support.';
                     }
-                    header("Location: " . $redirect);
-                    exit();
                 } else {
                     $alert_type = 'error';
-                    $alert_msg  = 'Your account has been suspended. Please contact support.';
+                    $alert_msg  = 'Invalid email or password. Please try again.';
                 }
-            } else {
+            } catch (PDOException $e) {
+                error_log("login.php PDO Error: " . $e->getMessage());
                 $alert_type = 'error';
-                $alert_msg  = 'Incorrect password. Please try again.';
+                $alert_msg  = 'A server error occurred. Please try again later.';
             }
         } else {
             $alert_type = 'error';
-            $alert_msg  = 'No account found with that email address.';
+            $alert_msg  = 'Please enter your email and password.';
         }
-        mysqli_stmt_close($stmt);
-    } else {
-        $alert_type = 'error';
-        $alert_msg  = 'Please enter your email and password.';
     }
 }
 
@@ -98,25 +169,33 @@ $redirect_param = isset($_GET['redirect']) ? htmlspecialchars($_GET['redirect'])
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Login to Geo Auction and start bidding on live auctions.">
-    <title>Login – Geo Auction</title>
+    <title>Sign In – Geo Auction</title>
     <link rel="stylesheet" href="assets/css/main.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- SweetAlert2 for modern interactive dialogs -->
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     <style>
         :root {
             --green: rgb(4 120 87);
         }
-        /* Custom wrapper to handle icon alignments inside form controls properly */
+        .btn-primary, button[type="submit"] {
+            background-color: rgb(4 120 87) !important;
+            border-color: rgb(4 120 87) !important;
+        }
+        .btn-primary:hover, button[type="submit"]:hover {
+            opacity: 0.9;
+        }
         .input-icon-wrap {
             position: relative;
-            display: flex;
-            align-items: center;
         }
         .input-icon-wrap .left-icon {
             position: absolute;
             left: 14px;
-            color: rgb(4 120 87);
-            font-size: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--green);
             pointer-events: none;
+            z-index: 2;
         }
         .input-icon-wrap .form-control {
             padding-left: 42px !important;
@@ -278,24 +357,21 @@ $redirect_param = isset($_GET['redirect']) ? htmlspecialchars($_GET['redirect'])
         <div class="auth-brand-stats">
             <div class="auth-stat">
                 <?php
-                $ls = mysqli_query($conn,"SELECT COUNT(*) AS c FROM items WHERE status='active'");
-                $lc = mysqli_fetch_assoc($ls)['c'] ?? 0;
+                $lc = (int)$pdo->query("SELECT COUNT(*) FROM items WHERE status='active'")->fetchColumn();
                 ?>
                 <div class="auth-stat-val"><?php echo number_format($lc); ?>+</div>
                 <div class="auth-stat-label">Live Auctions</div>
             </div>
             <div class="auth-stat">
                 <?php
-                $bs = mysqli_query($conn,"SELECT COUNT(*) AS c FROM bids");
-                $bc = mysqli_fetch_assoc($bs)['c'] ?? 0;
+                $bc = (int)$pdo->query("SELECT COUNT(*) FROM bids")->fetchColumn();
                 ?>
                 <div class="auth-stat-val"><?php echo number_format($bc); ?>+</div>
                 <div class="auth-stat-label">Bids Placed</div>
             </div>
             <div class="auth-stat">
                 <?php
-                $us = mysqli_query($conn,"SELECT COUNT(*) AS c FROM users");
-                $uc = mysqli_fetch_assoc($us)['c'] ?? 0;
+                $uc = (int)$pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
                 ?>
                 <div class="auth-stat-val"><?php echo number_format($uc); ?>+</div>
                 <div class="auth-stat-label">Members</div>
@@ -313,9 +389,8 @@ $redirect_param = isset($_GET['redirect']) ? htmlspecialchars($_GET['redirect'])
             <p>Sign in to your Geo Auction account to continue</p>
         </div>
 
-        <!-- Alert is now displayed exclusively via the Interactive Popup Modal above -->
-
         <form method="POST" action="" id="loginForm">
+            <?= csrf_field() ?>
             <input type="hidden" name="redirect" value="<?php echo htmlspecialchars($redirect_param); ?>">
 
             <div class="form-group">
@@ -359,7 +434,7 @@ $redirect_param = isset($_GET['redirect']) ? htmlspecialchars($_GET['redirect'])
 
         <div class="auth-divider"><span>or</span></div>
 
-        <a href="home.php" class="btn btn-block btn-lg" style="background:var(--bg);color:var(--text);border:2px solid var(--border);">
+        <a href="index.php" class="btn btn-block btn-lg" style="background:var(--bg);color:var(--text);border:2px solid var(--border);text-decoration:none;">
             <i class="fas fa-eye"></i> Browse Auctions as Guest
         </a>
 
@@ -395,7 +470,6 @@ function togglePwd() {
     var input = document.getElementById('password');
     var icon  = document.getElementById('eyeIcon');
     if (input.type === 'password') {
-        pwdInput = input;
         input.type = 'text';
         icon.className = 'fas fa-eye-slash';
     } else {
@@ -408,11 +482,7 @@ document.getElementById('loginForm').addEventListener('submit', function() {
     var btn = document.getElementById('loginBtn');
     btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Signing in...';
     btn.disabled = true;
-    if (typeof showLoader === 'function') {
-        showLoader('Authenticating, please wait...');
-    }
 });
 </script>
-<?php include_once __DIR__ . '/includes/components/loading_spinner_overlay.php'; ?>
 </body>
 </html>

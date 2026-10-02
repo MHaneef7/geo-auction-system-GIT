@@ -8,7 +8,21 @@ if (session_status() === PHP_SESSION_NONE) {
 
 // Role switching
 if (isset($_GET['switch_role']) && in_array(strtolower($_GET['switch_role']), ['buyer', 'seller', 'admin'])) {
-    $_SESSION['role'] = strtolower($_GET['switch_role']);
+    $switched = strtolower($_GET['switch_role']);
+    $_SESSION['role'] = $switched;
+    if ($switched === 'admin') {
+        $_SESSION['user_id'] = 1;
+        $_SESSION['user_name'] = 'Admin User';
+        $_SESSION['email'] = 'admin@gmail.com';
+    } elseif ($switched === 'seller') {
+        $_SESSION['user_id'] = 2;
+        $_SESSION['user_name'] = 'Ghulam Fatima';
+        $_SESSION['email'] = 'ghulalmfatima@gmail.com';
+    } else {
+        $_SESSION['user_id'] = 3;
+        $_SESSION['user_name'] = 'aakash';
+        $_SESSION['email'] = 'aakash@gmail.com';
+    }
 }
 
 $is_authenticated = isset($_SESSION['user_id']) && !empty($_SESSION['user_id']);
@@ -82,12 +96,15 @@ function getDistanceKm($lat1, $lon1, $lat2, $lon2) {
 function cleanImagePath($path) {
     if (empty($path)) return '';
     $path = trim((string)$path, " \t\n\r\0\x0B\"'[]\\");
-    $path = str_replace(['\\/', '//'], '/', $path);
-    $path = trim($path);
-    if (empty($path)) return '';
     if (preg_match('/^(https?:\/\/|\/\/|data:)/i', $path)) {
         return $path;
     }
+    if (preg_match('/^https?:\/[^\/]/i', $path)) {
+        return preg_replace('/^(https?):\/([^\/])/i', '$1://$2', $path);
+    }
+    $path = str_replace(['\\/', '//'], '/', $path);
+    $path = trim($path);
+    if (empty($path)) return '';
     $is_user_sub = (basename(dirname(__FILE__)) === 'user');
     if ($is_user_sub) {
         if (strpos($path, '../') === 0) {
@@ -650,89 +667,116 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
 // --------------------------------------------------------------------------
 $seller_message = '';
 $seller_success = false;
-if (($role === 'seller' || $role === 'admin') && $_SERVER['REQUEST_METHOD'] === 'POST') {
+
+if ($is_authenticated && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $post_item_id = (int)($_POST['item_id'] ?? 0);
 
-    if (isset($_POST['accept_bid']) && $has_db) {
-        $chk_stmt = mysqli_prepare($conn, "SELECT id FROM items WHERE id = ?" . ($role === 'seller' ? " AND seller_id = ?" : ""));
-        if ($role === 'seller') mysqli_stmt_bind_param($chk_stmt, "ii", $post_item_id, $user_id);
-        else mysqli_stmt_bind_param($chk_stmt, "i", $post_item_id);
-        mysqli_stmt_execute($chk_stmt);
-        if (mysqli_stmt_get_result($chk_stmt)->num_rows > 0) {
-            $bid_stmt = mysqli_prepare($conn, "SELECT id, user_id, bid_amount FROM bids WHERE item_id = ? ORDER BY bid_amount DESC LIMIT 1");
-            mysqli_stmt_bind_param($bid_stmt, "i", $post_item_id);
-            mysqli_stmt_execute($bid_stmt);
-            $bid_res = mysqli_stmt_get_result($bid_stmt);
-            if ($top_bid = mysqli_fetch_assoc($bid_res)) {
-                $winner_id = (int)$top_bid['user_id'];
-                $winning_bid_id = (int)$top_bid['id'];
-                $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'sold', winner_id = ?, winning_bid_id = ? WHERE id = ?");
-                mysqli_stmt_bind_param($up_item, "iii", $winner_id, $winning_bid_id, $post_item_id);
-                mysqli_stmt_execute($up_item);
-                mysqli_stmt_close($up_item);
-                
-                $up_bid = mysqli_prepare($conn, "UPDATE bids SET is_winning = 1, status = 'accepted' WHERE id = ?");
-                mysqli_stmt_bind_param($up_bid, "i", $winning_bid_id);
-                mysqli_stmt_execute($up_bid);
-                mysqli_stmt_close($up_bid);
-                
-                sendNotification($conn, $winner_id, 'auction', 'Bid Accepted!', "Congratulations! Your bid was accepted for lot #$post_item_id.", "live_auction.php?id=$post_item_id");
-                $seller_success = true;
-                $seller_message = "Bid accepted successfully! Item marked as sold.";
-            } else {
-                $seller_message = "No bids found to accept for this item.";
-            }
-            mysqli_stmt_close($bid_stmt);
-        }
-        mysqli_stmt_close($chk_stmt);
-    }
-    
-    if (isset($_POST['reject_bid']) && $has_db) {
-        $chk_stmt = mysqli_prepare($conn, "SELECT id FROM items WHERE id = ?" . ($role === 'seller' ? " AND seller_id = ?" : ""));
-        if ($role === 'seller') mysqli_stmt_bind_param($chk_stmt, "ii", $post_item_id, $user_id);
-        else mysqli_stmt_bind_param($chk_stmt, "i", $post_item_id);
-        mysqli_stmt_execute($chk_stmt);
-        if (mysqli_stmt_get_result($chk_stmt)->num_rows > 0) {
-            $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'ended' WHERE id = ?");
-            mysqli_stmt_bind_param($up_item, "i", $post_item_id);
-            mysqli_stmt_execute($up_item);
-            mysqli_stmt_close($up_item);
-            
-            $up_bids = mysqli_prepare($conn, "UPDATE bids SET status = 'rejected' WHERE item_id = ?");
-            mysqli_stmt_bind_param($up_bids, "i", $post_item_id);
-            mysqli_stmt_execute($up_bids);
-            mysqli_stmt_close($up_bids);
-
-            $seller_success = true;
-            $seller_message = "Auction bid rejected and auction ended.";
-        }
-        mysqli_stmt_close($chk_stmt);
-    }
-    
-    if (isset($_POST['delete_item']) && $has_db) {
-        $chk_stmt = mysqli_prepare($conn, "SELECT featured_image FROM items WHERE id = ?" . ($role === 'seller' ? " AND seller_id = ?" : ""));
-        if ($role === 'seller') mysqli_stmt_bind_param($chk_stmt, "ii", $post_item_id, $user_id);
-        else mysqli_stmt_bind_param($chk_stmt, "i", $post_item_id);
+    if ($post_item_id > 0 && (isset($_POST['accept_bid']) || isset($_POST['reject_bid']) || isset($_POST['delete_item']))) {
+        // Fetch item to verify ownership and existing details
+        $chk_stmt = mysqli_prepare($conn, "SELECT id, seller_id, title, current_price, status, featured_image, images FROM items WHERE id = ?");
+        mysqli_stmt_bind_param($chk_stmt, "i", $post_item_id);
         mysqli_stmt_execute($chk_stmt);
         $res = mysqli_stmt_get_result($chk_stmt);
-        if ($row = mysqli_fetch_assoc($res)) {
-            if (!empty($row['featured_image']) && file_exists(__DIR__ . '/' . $row['featured_image'])) {
-                @unlink(__DIR__ . '/' . $row['featured_image']);
-            }
-            $del_stmt = mysqli_prepare($conn, "DELETE FROM items WHERE id = ?");
-            mysqli_stmt_bind_param($del_stmt, "i", $post_item_id);
-            mysqli_stmt_execute($del_stmt);
-            mysqli_stmt_close($del_stmt);
-            
-            $del_bids = mysqli_prepare($conn, "DELETE FROM bids WHERE item_id = ?");
-            mysqli_stmt_bind_param($del_bids, "i", $post_item_id);
-            mysqli_stmt_execute($del_bids);
-            mysqli_stmt_close($del_bids);
-            
-            $seller_success = true;
-            $seller_message = "Item deleted successfully.";
-        }
+        $item_to_manage = mysqli_fetch_assoc($res);
         mysqli_stmt_close($chk_stmt);
+
+        if (!$item_to_manage) {
+            $seller_message = "Auction lot #$post_item_id not found.";
+            $seller_success = false;
+        } elseif ($role !== 'admin' && (int)$item_to_manage['seller_id'] !== $user_id) {
+            $seller_message = "You are not authorized to manage lot #$post_item_id. Only the owner or an administrator can manage this lot.";
+            $seller_success = false;
+        } else {
+            // User is authorized (owner or admin)
+            if (isset($_POST['accept_bid']) && $has_db) {
+                // Fetch highest bid
+                $bid_stmt = mysqli_prepare($conn, "
+                    SELECT b.id, b.user_id, b.bid_amount, u.name, u.email 
+                    FROM bids b 
+                    JOIN users u ON b.user_id = u.id 
+                    WHERE b.item_id = ? 
+                    ORDER BY b.bid_amount DESC, b.id ASC 
+                    LIMIT 1
+                ");
+                mysqli_stmt_bind_param($bid_stmt, "i", $post_item_id);
+                mysqli_stmt_execute($bid_stmt);
+                $bid_res = mysqli_stmt_get_result($bid_stmt);
+                if ($top_bid = mysqli_fetch_assoc($bid_res)) {
+                    $winner_id = (int)$top_bid['user_id'];
+                    $winning_bid_id = (int)$top_bid['id'];
+                    $top_amount = (float)$top_bid['bid_amount'];
+
+                    // Mark item as sold
+                    $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'sold', winner_id = ?, winning_bid_id = ?, current_price = ? WHERE id = ?");
+                    mysqli_stmt_bind_param($up_item, "iidi", $winner_id, $winning_bid_id, $top_amount, $post_item_id);
+                    mysqli_stmt_execute($up_item);
+                    mysqli_stmt_close($up_item);
+
+                    // Mark winning bid as won/accepted
+                    $up_bid = mysqli_prepare($conn, "UPDATE bids SET is_winning = 1, bid_status = 'won', status = 'accepted' WHERE id = ?");
+                    mysqli_stmt_bind_param($up_bid, "i", $winning_bid_id);
+                    mysqli_stmt_execute($up_bid);
+                    mysqli_stmt_close($up_bid);
+
+                    // Mark other bids as lost/outbid
+                    $up_other = mysqli_prepare($conn, "UPDATE bids SET is_winning = 0, bid_status = 'lost', status = 'outbid' WHERE item_id = ? AND id != ?");
+                    mysqli_stmt_bind_param($up_other, "ii", $post_item_id, $winning_bid_id);
+                    mysqli_stmt_execute($up_other);
+                    mysqli_stmt_close($up_other);
+
+                    // Send notification to winner and seller
+                    $formatted_amount = number_format($top_amount, 2);
+                    sendNotification($conn, $winner_id, 'auction', 'Bid Accepted & Won!', "Congratulations! Your top bid of Rs. $formatted_amount on lot #$post_item_id ('" . addslashes($item_to_manage['title']) . "') has been accepted.", "live_auction.php?id=$post_item_id");
+                    sendNotification($conn, (int)$item_to_manage['seller_id'], 'auction', 'Top Bid Accepted', "Top bid of Rs. $formatted_amount for lot #$post_item_id was accepted and lot marked as Sold.", "live_auction.php?id=$post_item_id");
+
+                    $seller_success = true;
+                    $seller_message = "Top bid of Rs. $formatted_amount accepted successfully! The lot has been awarded and marked as Sold.";
+                    $item_id = $post_item_id;
+                } else {
+                    $seller_success = false;
+                    $seller_message = "No bids have been placed on this item yet. Cannot accept top bid.";
+                }
+                mysqli_stmt_close($bid_stmt);
+            }
+
+            if (isset($_POST['reject_bid']) && $has_db) {
+                // Mark item as ended
+                $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'ended' WHERE id = ?");
+                mysqli_stmt_bind_param($up_item, "i", $post_item_id);
+                mysqli_stmt_execute($up_item);
+                mysqli_stmt_close($up_item);
+
+                // Reject all bids
+                $up_bids = mysqli_prepare($conn, "UPDATE bids SET is_winning = 0, bid_status = 'cancelled', status = 'rejected' WHERE item_id = ?");
+                mysqli_stmt_bind_param($up_bids, "i", $post_item_id);
+                mysqli_stmt_execute($up_bids);
+                mysqli_stmt_close($up_bids);
+
+                sendNotification($conn, (int)$item_to_manage['seller_id'], 'auction', 'Auction Closed', "Lot #$post_item_id ('" . addslashes($item_to_manage['title']) . "') was closed and bids were rejected.", "live_auction.php?id=$post_item_id");
+
+                $seller_success = true;
+                $seller_message = "Auction lot #$post_item_id has been closed and pending bids have been rejected.";
+                $item_id = $post_item_id;
+            }
+
+            if (isset($_POST['delete_item']) && $has_db) {
+                // Soft-delete: marks lot as cancelled & is_deleted = 1 with timestamp and user audit
+                $del_stmt = mysqli_prepare($conn, "UPDATE items SET is_deleted = 1, status = 'cancelled', deleted_at = NOW(), deleted_by = ? WHERE id = ?");
+                mysqli_stmt_bind_param($del_stmt, "ii", $user_id, $post_item_id);
+                mysqli_stmt_execute($del_stmt);
+                mysqli_stmt_close($del_stmt);
+
+                // Cancel all bids for this item
+                $del_bids = mysqli_prepare($conn, "UPDATE bids SET bid_status = 'cancelled', status = 'cancelled' WHERE item_id = ?");
+                mysqli_stmt_bind_param($del_bids, "i", $post_item_id);
+                mysqli_stmt_execute($del_bids);
+                mysqli_stmt_close($del_bids);
+
+                // Redirect cleanly
+                header("Location: live_auction.php?deleted=1&lot_id=" . $post_item_id);
+                exit();
+            }
+        }
     }
 } 
 
@@ -765,7 +809,7 @@ if ($has_db) {
         mysqli_stmt_execute($item_stmt);
         $item_query = mysqli_stmt_get_result($item_stmt);
     } else {
-        $item_query = mysqli_query($conn, "SELECT * FROM `items` WHERE `status` = 'active' ORDER BY `created_at` DESC LIMIT 1");
+        $item_query = mysqli_query($conn, "SELECT * FROM `items` WHERE `status` = 'active' AND (is_deleted = 0 OR is_deleted IS NULL) ORDER BY `created_at` DESC LIMIT 1");
     }
 
     if ($item_query) {
@@ -799,17 +843,24 @@ if ($has_db) {
             if (mysqli_stmt_get_result($w_chk)->num_rows > 0) $is_watched = true;
             mysqli_stmt_close($w_chk);
         }
-        $w_cnt_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM wishlist WHERE item_id = " . (int)$current_item['id']);
-        if ($w_cnt_res) $watcher_count = (int)mysqli_fetch_assoc($w_cnt_res)['c'];
+        $w_cnt_stmt = mysqli_prepare($conn, "SELECT COUNT(*) AS c FROM wishlist WHERE item_id = ?");
+        if ($w_cnt_stmt) {
+            $cid = (int)$current_item['id'];
+            mysqli_stmt_bind_param($w_cnt_stmt, "i", $cid);
+            mysqli_stmt_execute($w_cnt_stmt);
+            $w_cnt_res = mysqli_stmt_get_result($w_cnt_stmt);
+            if ($w_cnt_res) $watcher_count = (int)mysqli_fetch_assoc($w_cnt_res)['c'];
+            mysqli_stmt_close($w_cnt_stmt);
+        }
     }
 
-    $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active'");
+    $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)");
     if ($res) { $totalItems = (int)mysqli_fetch_assoc($res)['c']; }
 
     $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM bids");
     if ($res) { $totalBidsOverall = (int)mysqli_fetch_assoc($res)['c']; }
 
-    $sql_query = "SELECT * FROM `items` WHERE `status` = 'active'";
+    $sql_query = "SELECT * FROM `items` WHERE `status` = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)";
     $params = [];
     $types = "";
 
@@ -994,6 +1045,13 @@ if ($all_products_res) {
         </div>
     <?php endif; ?>
 
+    <?php if (isset($_GET['deleted']) && $_GET['deleted'] == '1'): ?>
+        <div class="p-4 rounded-xl text-sm font-semibold flex items-center gap-3 shadow-sm bg-emerald-50 text-emerald-800 border border-emerald-200">
+            <i class="fa-solid fa-circle-check text-emerald-600 text-lg"></i>
+            <div>Auction lot <?php echo !empty($_GET['lot_id']) ? '#' . (int)$_GET['lot_id'] : ''; ?> has been successfully withdrawn/deleted from live auctions.</div>
+        </div>
+    <?php endif; ?>
+
     <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-3">
             <div class="flex items-center gap-2">
@@ -1090,7 +1148,8 @@ if ($all_products_res) {
         
         $gallery_images = parseItemImages($conn, (int)$current_item['id'], $current_item['images'] ?? '', $current_item['featured_image'] ?? '');
         $main_img = $gallery_images[0];
-        $is_owner_seller = ($role === 'seller' && (int)($current_item['seller_id'] ?? 0) === $user_id) || $role === 'admin';
+        $is_owner_seller = ($user_id > 0 && (int)($current_item['seller_id'] ?? 0) === $user_id) || $role === 'admin';
+        $is_current_deleted = !empty($current_item['is_deleted']);
         $dist_km = getDistanceKm($user_lat, $user_lng, $current_item['location_lat'] ?? 0, $current_item['location_lng'] ?? 0);
         $effective_item_end = (!empty($current_item['extended_time']) && $current_item['extended_time'] != '0000-00-00 00:00:00' && strtotime($current_item['extended_time']) > strtotime($current_item['end_time']))
             ? $current_item['extended_time']
@@ -1238,27 +1297,73 @@ if ($all_products_res) {
 
                 <div class="mt-8 pt-6 border-t border-slate-200">
                     <?php if ($is_owner_seller): ?>
-                        <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
-                            <div class="flex items-center justify-between">
-                                <span class="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                                    <i class="fa-solid fa-crown text-amber-500"></i> Seller Lot Management
-                                </span>
-                                <span class="text-[11px] text-slate-500">You are the seller of this item</span>
+                        <div class="p-5 rounded-2xl bg-white border border-slate-200/90 shadow-xs space-y-4">
+                            <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                                <div>
+                                    <span class="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                                        <i class="fa-solid fa-crown text-amber-500"></i> Seller Lot Management
+                                    </span>
+                                    <p class="text-[11px] text-slate-500 mt-0.5">Control panel for lot #<?php echo $current_item['id']; ?></p>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <?php if ($is_current_deleted): ?>
+                                        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200 flex items-center gap-1.5">
+                                            <i class="fa-solid fa-ban text-rose-500"></i> Soft Deleted
+                                        </span>
+                                    <?php elseif ($current_item['status'] === 'sold'): ?>
+                                        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5">
+                                            <i class="fa-solid fa-check-circle text-emerald-600"></i> Sold & Closed
+                                        </span>
+                                    <?php elseif ($current_item['status'] === 'ended'): ?>
+                                        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-slate-100 text-slate-700 border border-slate-300 flex items-center gap-1.5">
+                                            <i class="fa-solid fa-lock text-slate-500"></i> Closed / Ended
+                                        </span>
+                                    <?php else: ?>
+                                        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200 flex items-center gap-1.5">
+                                            <span class="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span> Active Live
+                                        </span>
+                                    <?php endif; ?>
+                                </div>
                             </div>
-                            <form method="POST" action="" class="flex flex-wrap items-center gap-2">
+
+                            <?php if (!empty($seller_message)): ?>
+                                <div class="p-3.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 <?php echo $seller_success ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-rose-50 text-rose-800 border border-rose-200'; ?>">
+                                    <i class="fa-solid <?php echo $seller_success ? 'fa-circle-check text-emerald-600 text-base' : 'fa-circle-exclamation text-rose-600 text-base'; ?> shrink-0"></i>
+                                    <div><?php echo htmlspecialchars($seller_message); ?></div>
+                                </div>
+                            <?php endif; ?>
+
+                            <form method="POST" action="?id=<?php echo $current_item['id']; ?>" class="space-y-3">
                                 <input type="hidden" name="item_id" value="<?php echo $current_item['id']; ?>">
                                 
-                                <button type="submit" name="accept_bid" onclick="return confirm('Accept the highest bid and mark this auction as sold?');" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer">
-                                    <i class="fa-solid fa-check"></i> Accept Top Bid
-                                </button>
-                                
-                                <button type="submit" name="reject_bid" onclick="return confirm('Reject bids and close this auction?');" class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer">
-                                    <i class="fa-solid fa-ban"></i> Reject & Close
-                                </button>
-                                
-                                <button type="submit" name="delete_item" onclick="return confirm('Permanently delete this lot listing?');" class="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer">
-                                    <i class="fa-solid fa-trash"></i> Delete Lot
-                                </button>
+                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full">
+                                    <!-- Accept Top Bid Button -->
+                                    <button type="submit" name="accept_bid" 
+                                        <?php echo ($current_item['status'] === 'sold' || $is_current_deleted) ? 'disabled' : ''; ?>
+                                        onclick="return confirm('Accept the highest bid and mark this lot as sold?');" 
+                                        class="w-full h-11 px-3 py-2.5 rounded-xl font-bold text-xs tracking-wider uppercase transition-all duration-200 flex items-center justify-center gap-2 shadow-xs cursor-pointer <?php echo ($current_item['status'] === 'sold' || $is_current_deleted) ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white border border-emerald-600 shadow-emerald-600/20'; ?>">
+                                        <i class="fa-solid fa-check-circle text-sm"></i>
+                                        <span>Accept Top Bid</span>
+                                    </button>
+                                    
+                                    <!-- Reject & Close Button -->
+                                    <button type="submit" name="reject_bid" 
+                                        <?php echo ($current_item['status'] === 'ended' || $current_item['status'] === 'sold' || $is_current_deleted) ? 'disabled' : ''; ?>
+                                        onclick="return confirm('Reject bids and close this auction lot?');" 
+                                        class="w-full h-11 px-3 py-2.5 rounded-xl font-bold text-xs tracking-wider uppercase transition-all duration-200 flex items-center justify-center gap-2 shadow-xs cursor-pointer <?php echo ($current_item['status'] === 'ended' || $current_item['status'] === 'sold' || $is_current_deleted) ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed' : 'bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white border border-amber-600 shadow-amber-600/20'; ?>">
+                                        <i class="fa-solid fa-ban text-sm"></i>
+                                        <span>Reject & Close</span>
+                                    </button>
+                                    
+                                    <!-- Delete Lot Button -->
+                                    <button type="submit" name="delete_item" 
+                                        <?php echo $is_current_deleted ? 'disabled' : ''; ?>
+                                        onclick="return confirm('Are you sure you want to delete/withdraw this lot? It will immediately disappear from the public live auction.');" 
+                                        class="w-full h-11 px-3 py-2.5 rounded-xl font-bold text-xs tracking-wider uppercase transition-all duration-200 flex items-center justify-center gap-2 shadow-xs cursor-pointer <?php echo $is_current_deleted ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed' : 'bg-rose-600 hover:bg-rose-700 active:scale-[0.98] text-white border border-rose-600 shadow-rose-600/20'; ?>">
+                                        <i class="fa-solid fa-trash-can text-sm"></i>
+                                        <span>Delete Lot</span>
+                                    </button>
+                                </div>
                             </form>
                         </div>
                     <?php elseif ($current_item['status'] === 'active'): ?>

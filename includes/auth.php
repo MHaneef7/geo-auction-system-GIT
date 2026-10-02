@@ -5,9 +5,11 @@ if (session_status() === PHP_SESSION_NONE) {
 
 include_once __DIR__ . '/database.php';
 
-function is_logged_in() {
-    return (isset($_SESSION['user_id']) && !empty($_SESSION['user_id'])) ||
-           (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true);
+if (!function_exists('is_logged_in')) {
+    function is_logged_in() {
+        return (isset($_SESSION['user_id']) && !empty($_SESSION['user_id'])) ||
+               (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true);
+    }
 }
 
 function is_admin() {

@@ -14,16 +14,16 @@ $total_users  = mysqli_fetch_assoc($users_res)['c'] ?? 0;
 $items_res    = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items");
 $total_items  = mysqli_fetch_assoc($items_res)['c'] ?? 0;
 
-$active_res   = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active'");
+$active_res   = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)");
 $active_items = mysqli_fetch_assoc($active_res)['c'] ?? 0;
 
-$ended_res    = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'ended'");
+$ended_res    = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status IN ('ended', 'sold') AND (is_deleted = 0 OR is_deleted IS NULL)");
 $ended_items  = mysqli_fetch_assoc($ended_res)['c'] ?? 0;
 
 $bids_res     = mysqli_query($conn, "SELECT COUNT(*) AS c FROM bids");
 $total_bids   = mysqli_fetch_assoc($bids_res)['c'] ?? 0;
 
-$revenue_res  = mysqli_query($conn, "SELECT SUM(current_price) AS s FROM items WHERE status = 'ended'");
+$revenue_res  = mysqli_query($conn, "SELECT SUM(current_price) AS s FROM items WHERE status IN ('ended', 'sold') AND (is_deleted = 0 OR is_deleted IS NULL)");
 $total_rev    = mysqli_fetch_assoc($revenue_res)['s'] ?? 0;
 
 $avg_bid_res  = mysqli_query($conn, "SELECT AVG(bid_amount) AS avg FROM bids");
@@ -33,7 +33,7 @@ $avg_bid      = mysqli_fetch_assoc($avg_bid_res)['avg'] ?? 0;
 $top_sellers_res = mysqli_query($conn, "
     SELECT u.name, u.email, COUNT(i.id) AS item_count, SUM(i.current_price) AS revenue
     FROM users u
-    JOIN items i ON i.seller_id = u.id AND i.status = 'ended'
+    JOIN items i ON i.seller_id = u.id AND i.status IN ('ended', 'sold') AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
     GROUP BY u.id
     ORDER BY revenue DESC
     LIMIT 5
@@ -159,6 +159,7 @@ $recent_bids_res = mysqli_query($conn, "
         
         <div class="nav-category">System</div>
         <a href="reports.php" class="active"><i class="fas fa-chart-line me-2"></i> Reports</a>
+        <a href="setting.php"><i class="fas fa-database me-2"></i> Database & Backup</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>
     </div>
 

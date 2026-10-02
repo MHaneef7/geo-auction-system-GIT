@@ -62,13 +62,13 @@ if ($user_role === 'seller' || $user_role === 'admin') {
     $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items" . ($user_role === 'seller' ? " WHERE seller_id = $user_id" : ""));
     if ($res) { $totalItems = mysqli_fetch_assoc($res)['c']; }
 
-    $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND start_time <= NOW() AND end_time >= NOW()" . ($user_role === 'seller' ? " WHERE seller_id = $user_id" : ""));
+    $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND start_time <= NOW() AND end_time >= NOW()" . ($user_role === 'seller' ? " AND seller_id = $user_id" : ""));
     if ($res) { $liveAuctions = mysqli_fetch_assoc($res)['c']; }
 
-    $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE start_time > NOW()" . ($user_role === 'seller' ? " WHERE seller_id = $user_id" : ""));
+    $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE start_time > NOW()" . ($user_role === 'seller' ? " AND seller_id = $user_id" : ""));
     if ($res) { $upcomingAuctions = mysqli_fetch_assoc($res)['c']; }
 
-    $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE winner_id IS NOT NULL" . ($user_role === 'seller' ? " WHERE seller_id = $user_id" : ""));
+    $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE winner_id IS NOT NULL" . ($user_role === 'seller' ? " AND seller_id = $user_id" : ""));
     if ($res) { $soldItems = mysqli_fetch_assoc($res)['c']; }
 
     $res = mysqli_query($conn, "SELECT COUNT(b.id) AS c FROM bids b" . ($user_role === 'seller' ? " JOIN items i ON b.item_id = i.id WHERE i.seller_id = $user_id" : ""));

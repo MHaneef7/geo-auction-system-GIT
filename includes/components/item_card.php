@@ -19,14 +19,17 @@
 
 if (!function_exists('cleanCardImagePath')) {
     function cleanCardImagePath($path, $is_subfolder = false) {
-        if (empty($path)) return 'assets/image/Geo-auction.png';
+        if (empty($path)) return ($is_subfolder ? '../' : '') . 'assets/image/Geo-auction.png';
         $path = trim((string)$path, " \t\n\r\0\x0B\"'[]\\");
-        $path = str_replace(['\\/', '//'], '/', $path);
-        $path = trim($path);
-        if (empty($path)) return 'assets/image/Geo-auction.png';
         if (preg_match('/^(https?:\/\/|\/\/|data:)/i', $path)) {
             return $path;
         }
+        if (preg_match('/^https?:\/[^\/]/i', $path)) {
+            return preg_replace('/^(https?):\/([^\/])/i', '$1://$2', $path);
+        }
+        $path = str_replace(['\\/', '//'], '/', $path);
+        $path = trim($path);
+        if (empty($path)) return ($is_subfolder ? '../' : '') . 'assets/image/Geo-auction.png';
         if ($is_subfolder && strpos($path, '../') !== 0) {
             return '../' . $path;
         }

@@ -156,26 +156,38 @@ $wishlist_rows = [];
 if ($is_db_connected) {
     if ($role === 'seller') {
         // Seller view: Items owned by this seller that buyers have bookmarked
-        $wishlist_query = mysqli_query($conn, "
+        $sql = "
             SELECT w.id, w.user_id, w.item_id, w.created_at, 
                 i.title, i.current_price, i.starting_price, i.status, i.auction_code, i.images,
                 u.name AS buyer_name, u.email AS buyer_email
             FROM wishlist w
             JOIN items i ON w.item_id = i.id
             JOIN users u ON w.user_id = u.id
-            WHERE i.seller_id = $user_id
+            WHERE i.seller_id = ? AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
             ORDER BY w.created_at DESC
-        ");
+        ";
+        $w_stmt = mysqli_prepare($conn, $sql);
+        if ($w_stmt) {
+            mysqli_stmt_bind_param($w_stmt, "i", $user_id);
+            mysqli_stmt_execute($w_stmt);
+            $wishlist_query = mysqli_stmt_get_result($w_stmt);
+        }
     } else {
         // Buyer view: Items bookmarked by this buyer
-        $wishlist_query = mysqli_query($conn, "
+        $sql = "
             SELECT w.id, w.user_id, w.item_id, w.created_at, 
                 i.title, i.current_price, i.starting_price, i.status, i.auction_code, i.images
             FROM wishlist w
             JOIN items i ON w.item_id = i.id
-            WHERE w.user_id = $user_id
+            WHERE w.user_id = ? AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
             ORDER BY w.created_at DESC
-        ");
+        ";
+        $w_stmt = mysqli_prepare($conn, $sql);
+        if ($w_stmt) {
+            mysqli_stmt_bind_param($w_stmt, "i", $user_id);
+            mysqli_stmt_execute($w_stmt);
+            $wishlist_query = mysqli_stmt_get_result($w_stmt);
+        }
     }
 
     if ($wishlist_query) {

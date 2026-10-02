@@ -10,14 +10,27 @@ require_admin('../index.php');
 
 // Filter by item
 $item_filter = isset($_GET['item_id']) ? (int)$_GET['item_id'] : 0;
-$search      = isset($_GET['search']) ? mysqli_real_escape_string($conn, trim($_GET['search'])) : '';
+$search      = isset($_GET['search']) ? trim($_GET['search']) : '';
 
 $where_parts = [];
-if ($item_filter) $where_parts[] = "b.item_id = $item_filter";
-if ($search)      $where_parts[] = "(u.name LIKE '%$search%' OR i.title LIKE '%$search%')";
-$where = count($where_parts) ? 'WHERE ' . implode(' AND ', $where_parts) : '';
+$params      = [];
+$types       = '';
 
-$bids_res = mysqli_query($conn, "
+if ($item_filter > 0) {
+    $where_parts[] = "b.item_id = ?";
+    $params[]      = $item_filter;
+    $types        .= 'i';
+}
+if ($search !== '') {
+    $where_parts[] = "(u.name LIKE ? OR i.title LIKE ?)";
+    $like_term     = '%' . $search . '%';
+    $params[]      = $like_term;
+    $params[]      = $like_term;
+    $types        .= 'ss';
+}
+
+$where = count($where_parts) ? 'WHERE ' . implode(' AND ', $where_parts) : '';
+$sql = "
     SELECT b.*, u.name AS bidder_name, u.email AS bidder_email, i.title AS item_title
     FROM bids b
     LEFT JOIN users u ON u.id = b.user_id
@@ -25,7 +38,16 @@ $bids_res = mysqli_query($conn, "
     $where
     ORDER BY b.id DESC
     LIMIT 500
-");
+";
+
+if (!empty($params)) {
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, $types, ...$params);
+    mysqli_stmt_execute($stmt);
+    $bids_res = mysqli_stmt_get_result($stmt);
+} else {
+    $bids_res = mysqli_query($conn, $sql);
+}
 
 // Stats
 $total_bids_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM bids");
@@ -115,6 +137,7 @@ $total_amount = mysqli_fetch_assoc($total_amount_res)['s'] ?? 0;
         
         <div class="nav-category">System</div>
         <a href="reports.php"><i class="fas fa-chart-line me-2"></i> Reports</a>
+        <a href="setting.php"><i class="fas fa-database me-2"></i> Database & Backup</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>
     </div>
 

@@ -2,15 +2,30 @@
 $require_auth = false;
 include_once('includes/header.php');
 
-$q = mysqli_real_escape_string($conn, trim($_GET['q'] ?? ''));
+$q = trim($_GET['q'] ?? '');
 
-$where = "WHERE status = 'active'";
-if (!empty($q)) {
-    $where .= " AND (title LIKE '%$q%' OR description LIKE '%$q%')";
+$sql = "SELECT * FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)";
+$params = [];
+$types = '';
+
+if ($q !== '') {
+    $sql .= " AND (title LIKE ? OR description LIKE ?)";
+    $like = '%' . $q . '%';
+    $params[] = $like;
+    $params[] = $like;
+    $types = 'ss';
 }
 
-$sql = "SELECT * FROM items $where ORDER BY id DESC";
-$res = mysqli_query($conn, $sql);
+$sql .= " ORDER BY id DESC";
+
+if (!empty($params)) {
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, $types, ...$params);
+    mysqli_stmt_execute($stmt);
+    $res = mysqli_stmt_get_result($stmt);
+} else {
+    $res = mysqli_query($conn, $sql);
+}
 ?>
 
 <div style="max-width: 1200px; margin: 24px auto; padding: 0 20px;">
@@ -38,7 +53,7 @@ $res = mysqli_query($conn, $sql);
                             <?php echo htmlspecialchars($item['title']); ?>
                         </h4>
                         <p style="color:rgb(4 120 87); font-size:18px; font-weight:800; margin-bottom:6px;">
-                            $<?php echo number_format($item['current_price'] ?? $item['starting_price'], 2); ?>
+                            Rs. <?php echo number_format($item['current_price'] ?? $item['starting_price'], 2); ?>
                         </p>
                         <p style="color:#888; font-size:12px; margin-bottom:12px;">
                             <i class="fa-solid fa-clock"></i> <?php echo $time_left; ?>

@@ -25,7 +25,7 @@ require_once __DIR__ . '/includes/MessageService.php';
 
 require_login('login.php?redirect=messages.php');
 
-$currentUserId = (int)($_SESSION['user_id'] ?? 0);
+$currentUserId = (int)($_SESSION['user_id'] ?? ($_SESSION['admin_id'] ?? 0));
 $msgService    = new MessageService();
 
 $targetUserId = isset($_GET['user_id']) ? (int)$_GET['user_id'] : 0;

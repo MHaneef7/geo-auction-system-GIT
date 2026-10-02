@@ -6,6 +6,43 @@
  * Implements full Object-Oriented PDO database operations, CSRF protection,
  * role-based access control (Owner Seller or Admin), auction safety controls,
  * multi-image management, server-side validation, and Bootstrap 5 responsive UI.
+ *
+ * ============================================================================
+ * SQL SCHEMA REFERENCE (categories & items tables):
+ * ============================================================================
+ * CREATE TABLE IF NOT EXISTS categories (
+ *     id INT AUTO_INCREMENT PRIMARY KEY,
+ *     name VARCHAR(100) NOT NULL UNIQUE,
+ *     slug VARCHAR(100) NOT NULL UNIQUE,
+ *     description TEXT NULL,
+ *     icon VARCHAR(50) NULL DEFAULT 'fa-tag',
+ *     status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
+ *     sort_order INT NOT NULL DEFAULT 0,
+ *     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ *     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+ * ) ENGINE=InnoDB;
+ *
+ * CREATE TABLE IF NOT EXISTS items (
+ *     id INT AUTO_INCREMENT PRIMARY KEY,
+ *     auction_code VARCHAR(20) NOT NULL UNIQUE,
+ *     title VARCHAR(255) NOT NULL,
+ *     slug VARCHAR(255) NOT NULL,
+ *     category_id INT NULL,
+ *     seller_id INT NOT NULL,
+ *     starting_price DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+ *     current_price DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+ *     reserve_price DECIMAL(12, 2) NULL,
+ *     min_increment DECIMAL(12, 2) NOT NULL DEFAULT 100.00,
+ *     buy_it_now_price DECIMAL(12, 2) NULL,
+ *     status ENUM('pending', 'active', 'paused', 'ended', 'cancelled', 'sold') NOT NULL DEFAULT 'active',
+ *     start_time DATETIME NOT NULL,
+ *     end_time DATETIME NOT NULL,
+ *     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+ *     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+ *     FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL,
+ *     FOREIGN KEY (seller_id) REFERENCES users(id) ON DELETE CASCADE
+ * ) ENGINE=InnoDB;
+ * ============================================================================
  */
 
 declare(strict_types=1);
@@ -63,6 +100,23 @@ $csrf_token = $_SESSION['csrf_token'];
 if (!function_exists('verify_csrf_token')) {
     function verify_csrf_token(?string $token): bool {
         return !empty($token) && !empty($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
+    }
+}
+
+// Helper to safely format category Font Awesome icon class
+if (!function_exists('format_category_icon')) {
+    function format_category_icon(?string $icon): string {
+        $icon = trim((string)$icon);
+        if ($icon === '') {
+            return 'fa-solid fa-tags';
+        }
+        if (preg_match('/^(fas|far|fab|fa-solid|fa-regular|fa-brands)\s+/i', $icon)) {
+            return $icon;
+        }
+        if (strpos($icon, 'fa-') === 0) {
+            return 'fa-solid ' . $icon;
+        }
+        return 'fa-solid fa-' . $icon;
     }
 }
 
@@ -352,6 +406,15 @@ if ($item && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                 }
             }
 
+            // Verify category exists in database
+            if ($error_msg === '' && $category_id > 0) {
+                $cat_chk = $pdo->prepare("SELECT id FROM categories WHERE id = :cid LIMIT 1");
+                $cat_chk->execute([':cid' => $category_id]);
+                if (!$cat_chk->fetch()) {
+                    $error_msg = 'The selected auction category does not exist.';
+                }
+            }
+
             // 3. Process New Image Uploads (Up to 5 total images)
             $newly_uploaded_paths = [];
             if ($error_msg === '' && isset($_FILES['new_images']) && !empty($_FILES['new_images']['name'][0])) {
@@ -565,7 +628,14 @@ $existing_images = [];
 
 if ($item) {
     try {
-        $stmt_cats = $pdo->query("SELECT id, name FROM categories WHERE status = 'active' ORDER BY sort_order ASC, name ASC");
+        $current_item_cat_id = (int)($item['category_id'] ?? 0);
+        $stmt_cats = $pdo->prepare("
+            SELECT id, name, slug, description, icon, status 
+            FROM categories 
+            WHERE status = 'active' OR id = :current_cat_id 
+            ORDER BY sort_order ASC, name ASC
+        ");
+        $stmt_cats->execute([':current_cat_id' => $current_item_cat_id]);
         $categories_list = $stmt_cats->fetchAll();
 
         // Existing images from item_images
@@ -689,6 +759,46 @@ include_once __DIR__ . '/../includes/header.php';
 .readonly-lock {
     background-color: #f1f5f9 !important;
     cursor: not-allowed;
+}
+
+/* Category Selector Custom Component Styles */
+.text-emerald {
+    color: #047857 !important;
+}
+.bg-emerald {
+    background-color: #047857 !important;
+}
+.bg-emerald-light {
+    background-color: rgba(4, 120, 87, 0.08) !important;
+}
+.border-emerald {
+    border-color: #047857 !important;
+}
+.category-select-item {
+    transition: all 0.15s ease-in-out;
+    cursor: pointer;
+}
+.category-select-item:hover {
+    background-color: rgba(4, 120, 87, 0.08) !important;
+    color: #047857 !important;
+}
+.category-select-item.active-category {
+    background-color: rgba(4, 120, 87, 0.12) !important;
+}
+.category-radio-card {
+    transition: all 0.2s ease;
+    cursor: pointer;
+    user-select: none;
+}
+.category-radio-card:hover {
+    border-color: #047857 !important;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(4, 120, 87, 0.12);
+}
+.category-radio-card.active-card {
+    background-color: #f0fdf4 !important;
+    border-color: #047857 !important;
+    border-width: 2px !important;
 }
 </style>
 
@@ -895,7 +1005,7 @@ include_once __DIR__ . '/../includes/header.php';
                         </h5>
                         <div class="row g-3">
                             <!-- 1. Item Title -->
-                            <div class="col-md-8">
+                            <div class="col-md-7">
                                 <label for="fieldTitle" class="form-label fw-semibold text-secondary small">
                                     Item Title <span class="text-danger">*</span>
                                 </label>
@@ -909,21 +1019,119 @@ include_once __DIR__ . '/../includes/header.php';
                                 <div class="form-text">A descriptive title helps buyers find your listing quickly.</div>
                             </div>
 
-                            <!-- 4. Category Dropdown -->
-                            <div class="col-md-4">
-                                <label for="fieldCategory" class="form-label fw-semibold text-secondary small">
-                                    Category <span class="text-danger">*</span>
-                                </label>
-                                <select class="form-select form-select-lg" id="fieldCategory" name="category_id" required>
-                                    <option value="">-- Select Category --</option>
-                                    <?php foreach ($categories_list as $cat): 
-                                        $selected = ((int)($_POST['category_id'] ?? $item['category_id']) === (int)$cat['id']) ? 'selected' : '';
-                                    ?>
-                                        <option value="<?= (int)$cat['id']; ?>" <?= $selected; ?>>
-                                            <?= htmlspecialchars($cat['name']); ?>
-                                        </option>
-                                    <?php endforeach; ?>
-                                </select>
+                            <!-- 4. Category Selector (Side-by-Side Icon & Name) -->
+                            <div class="col-md-5">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <label for="fieldCategoryInput" class="form-label fw-semibold text-secondary small mb-0">
+                                        Category <span class="text-danger fw-bold">*</span>
+                                    </label>
+                                    <button type="button" class="btn btn-link btn-sm p-0 text-emerald text-decoration-none small fw-semibold" id="toggleCategoryGridBtn" style="font-size: 0.78rem;">
+                                        <i class="bi bi-grid-3x3-gap me-1"></i> <span id="toggleCategoryGridText">Card Grid</span>
+                                    </button>
+                                </div>
+
+                                <!-- Custom Styled Select Dropdown (Icon + Name Side-by-Side) -->
+                                <div class="dropdown custom-category-dropdown position-relative">
+                                    <button class="form-select form-select-lg text-start d-flex align-items-center justify-content-between shadow-none bg-white w-100" 
+                                            type="button" 
+                                            id="categoryDropdownTrigger" 
+                                            data-bs-toggle="dropdown" 
+                                            aria-expanded="false" 
+                                            style="height: 48px; border-color: #cbd5e1;">
+                                        <span class="d-flex align-items-center gap-2 text-truncate" id="selectedCatDisplay">
+                                            <span class="rounded-2 d-inline-flex align-items-center justify-content-center text-center bg-emerald-light text-emerald" style="width: 30px; height: 30px; font-size: 0.95rem;">
+                                                <i class="fa-solid fa-tags"></i>
+                                            </span>
+                                            <span class="fw-semibold text-dark text-truncate">Select Category</span>
+                                        </span>
+                                    </button>
+
+                                    <div class="dropdown-menu dropdown-menu-end w-100 p-2 shadow-lg border-0 rounded-3 mt-1" 
+                                         aria-labelledby="categoryDropdownTrigger" 
+                                         style="min-width: 290px; max-height: 350px; overflow-y: auto; z-index: 1060;">
+                                        <!-- Search input -->
+                                        <div class="p-1 mb-2 sticky-top bg-white border-bottom pb-2">
+                                            <div class="input-group input-group-sm">
+                                                <span class="input-group-text bg-light border-end-0 text-muted"><i class="bi bi-search"></i></span>
+                                                <input type="text" class="form-control border-start-0 shadow-none" id="catDropdownSearch" placeholder="Search categories...">
+                                            </div>
+                                        </div>
+
+                                        <!-- Categories options list -->
+                                        <div class="cat-options-container" id="catOptionsContainer">
+                                            <?php 
+                                            $selected_cat_id = (int)($_POST['category_id'] ?? ($item['category_id'] ?? 0));
+                                            foreach ($categories_list as $cat): 
+                                                $cid = (int)$cat['id'];
+                                                $cname = htmlspecialchars($cat['name']);
+                                                $cicon = htmlspecialchars(format_category_icon($cat['icon'] ?? 'fa-tag'));
+                                                $is_selected = ($cid === $selected_cat_id);
+                                            ?>
+                                                <button type="button" 
+                                                        class="dropdown-item d-flex align-items-center justify-content-between py-2 px-2.5 rounded-2 category-select-item mb-1 <?= $is_selected ? 'active-category' : ''; ?>"
+                                                        data-cat-id="<?= $cid; ?>"
+                                                        data-cat-name="<?= $cname; ?>"
+                                                        data-cat-icon="<?= $cicon; ?>">
+                                                    <div class="d-flex align-items-center gap-2 text-truncate">
+                                                        <span class="category-icon-box rounded-2 d-inline-flex align-items-center justify-content-center text-center <?= $is_selected ? 'bg-emerald text-white' : 'bg-light text-secondary'; ?>" 
+                                                              style="width: 30px; height: 30px; font-size: 0.95rem;">
+                                                            <i class="<?= $cicon; ?>"></i>
+                                                        </span>
+                                                        <span class="category-name-label text-truncate <?= $is_selected ? 'fw-bold text-emerald' : 'text-dark'; ?>">
+                                                            <?= $cname; ?>
+                                                        </span>
+                                                    </div>
+                                                    <?php if ($is_selected): ?>
+                                                        <i class="bi bi-check-circle-fill text-emerald fs-6 flex-shrink-0 ms-2"></i>
+                                                    <?php endif; ?>
+                                                </button>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Hidden Input submitted with the form -->
+                                <input type="hidden" name="category_id" id="fieldCategoryInput" value="<?= (int)($_POST['category_id'] ?? ($item['category_id'] ?? 0)); ?>" required>
+                                <div class="form-text">Choose the most accurate category to ensure high bidder discoverability.</div>
+                            </div>
+
+                            <!-- Expandable Visual Card Grid -->
+                            <div class="col-12 d-none" id="categoryGridCollapse">
+                                <div class="p-3 bg-light border rounded-3 mb-2">
+                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                        <span class="small fw-semibold text-secondary">
+                                            <i class="bi bi-collection me-1"></i> Visual Category Cards:
+                                        </span>
+                                        <small class="text-muted">Click any card to select</small>
+                                    </div>
+                                    <div class="row g-2 category-card-grid">
+                                        <?php 
+                                        $selected_cat_id = (int)($_POST['category_id'] ?? ($item['category_id'] ?? 0));
+                                        foreach ($categories_list as $cat): 
+                                            $cid = (int)$cat['id'];
+                                            $cname = htmlspecialchars($cat['name']);
+                                            $cicon = htmlspecialchars(format_category_icon($cat['icon'] ?? 'fa-tag'));
+                                            $is_selected = ($cid === $selected_cat_id);
+                                        ?>
+                                            <div class="col-6 col-sm-4 col-md-3 col-lg-2">
+                                                <div class="card h-100 category-radio-card p-2 text-center rounded-3 border <?= $is_selected ? 'border-emerald active-card shadow-sm' : 'border-light-subtle bg-white'; ?>"
+                                                     data-cat-id="<?= $cid; ?>"
+                                                     data-cat-name="<?= $cname; ?>"
+                                                     data-cat-icon="<?= $cicon; ?>">
+                                                    <div class="cat-card-icon fs-3 mb-1 <?= $is_selected ? 'text-emerald' : 'text-secondary'; ?>">
+                                                        <i class="<?= $cicon; ?>"></i>
+                                                    </div>
+                                                    <div class="small fw-semibold text-truncate <?= $is_selected ? 'text-emerald' : 'text-dark'; ?>" title="<?= $cname; ?>">
+                                                        <?= $cname; ?>
+                                                    </div>
+                                                    <?php if ($is_selected): ?>
+                                                        <span class="badge bg-emerald text-white rounded-pill px-2 py-0.5 mt-1 small" style="font-size: 0.65rem;">Selected</span>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+                                        <?php endforeach; ?>
+                                    </div>
+                                </div>
                             </div>
 
                             <!-- 2. Short Description -->
@@ -1356,6 +1564,162 @@ document.addEventListener('DOMContentLoaded', function () {
                 reader.readAsDataURL(file);
             });
         });
+    }
+
+    // -------------------------------------------------------------
+    // Category Selector Interactivity (Dropdown, Search, Grid Sync)
+    // -------------------------------------------------------------
+    const hiddenCatInput   = document.getElementById('fieldCategoryInput');
+    const selectedCatSpan  = document.getElementById('selectedCatDisplay');
+    const categoryOptions  = document.querySelectorAll('.category-select-item');
+    const categoryCards    = document.querySelectorAll('.category-radio-card');
+    const categorySearch   = document.getElementById('catDropdownSearch');
+    const toggleGridBtn    = document.getElementById('toggleCategoryGridBtn');
+    const gridCollapse     = document.getElementById('categoryGridCollapse');
+    const toggleGridText   = document.getElementById('toggleCategoryGridText');
+
+    function selectCategory(catId, catName, catIcon) {
+        if (!hiddenCatInput) return;
+        hiddenCatInput.value = catId;
+
+        // 1. Update dropdown button display
+        if (selectedCatSpan) {
+            selectedCatSpan.innerHTML = `
+                <span class="rounded-2 d-inline-flex align-items-center justify-content-center text-center bg-emerald-light text-emerald" style="width: 30px; height: 30px; font-size: 0.95rem;">
+                    <i class="${catIcon}"></i>
+                </span>
+                <span class="fw-bold text-dark text-truncate">${catName}</span>
+            `;
+        }
+
+        // 2. Synchronize dropdown items
+        categoryOptions.forEach(opt => {
+            const isMatch = (opt.dataset.catId === String(catId));
+            const iconBox = opt.querySelector('.category-icon-box');
+            const nameLabel = opt.querySelector('.category-name-label');
+            let checkIcon = opt.querySelector('.bi-check-circle-fill');
+
+            if (isMatch) {
+                opt.classList.add('active-category');
+                if (iconBox) {
+                    iconBox.className = 'category-icon-box rounded-2 d-inline-flex align-items-center justify-content-center text-center bg-emerald text-white';
+                }
+                if (nameLabel) {
+                    nameLabel.className = 'category-name-label text-truncate fw-bold text-emerald';
+                }
+                if (!checkIcon) {
+                    const check = document.createElement('i');
+                    check.className = 'bi bi-check-circle-fill text-emerald fs-6 flex-shrink-0 ms-2';
+                    opt.appendChild(check);
+                }
+            } else {
+                opt.classList.remove('active-category');
+                if (iconBox) {
+                    iconBox.className = 'category-icon-box rounded-2 d-inline-flex align-items-center justify-content-center text-center bg-light text-secondary';
+                }
+                if (nameLabel) {
+                    nameLabel.className = 'category-name-label text-truncate text-dark';
+                }
+                if (checkIcon) {
+                    checkIcon.remove();
+                }
+            }
+        });
+
+        // 3. Synchronize visual cards
+        categoryCards.forEach(card => {
+            const isMatch = (card.dataset.catId === String(catId));
+            const iconEl  = card.querySelector('.cat-card-icon');
+            const nameEl  = card.querySelector('.small.fw-semibold');
+            let badgeEl   = card.querySelector('.badge');
+
+            if (isMatch) {
+                card.className = 'card h-100 category-radio-card p-2 text-center rounded-3 border border-emerald active-card shadow-sm';
+                if (iconEl) iconEl.className = 'cat-card-icon fs-3 mb-1 text-emerald';
+                if (nameEl) nameEl.className = 'small fw-semibold text-truncate text-emerald';
+                if (!badgeEl) {
+                    const badge = document.createElement('span');
+                    badge.className = 'badge bg-emerald text-white rounded-pill px-2 py-0.5 mt-1 small';
+                    badge.style.fontSize = '0.65rem';
+                    badge.textContent = 'Selected';
+                    card.appendChild(badge);
+                }
+            } else {
+                card.className = 'card h-100 category-radio-card p-2 text-center rounded-3 border border-light-subtle bg-white';
+                if (iconEl) iconEl.className = 'cat-card-icon fs-3 mb-1 text-secondary';
+                if (nameEl) nameEl.className = 'small fw-semibold text-truncate text-dark';
+                if (badgeEl) badgeEl.remove();
+            }
+        });
+    }
+
+    // Attach click listeners on dropdown items
+    categoryOptions.forEach(opt => {
+        opt.addEventListener('click', function (e) {
+            e.preventDefault();
+            selectCategory(this.dataset.catId, this.dataset.catName, this.dataset.catIcon);
+        });
+    });
+
+    // Attach click listeners on card grid items
+    categoryCards.forEach(card => {
+        card.addEventListener('click', function () {
+            selectCategory(this.dataset.catId, this.dataset.catName, this.dataset.catIcon);
+        });
+    });
+
+    // Dropdown live filter search
+    if (categorySearch) {
+        categorySearch.addEventListener('input', function () {
+            const query = this.value.toLowerCase().trim();
+            categoryOptions.forEach(opt => {
+                const name = (opt.dataset.catName || '').toLowerCase();
+                if (!query || name.includes(query)) {
+                    opt.classList.remove('d-none');
+                } else {
+                    opt.classList.add('d-none');
+                }
+            });
+        });
+    }
+
+    // Toggle card grid view
+    if (toggleGridBtn && gridCollapse) {
+        toggleGridBtn.addEventListener('click', function () {
+            const isHidden = gridCollapse.classList.contains('d-none');
+            if (isHidden) {
+                gridCollapse.classList.remove('d-none');
+                if (toggleGridText) toggleGridText.textContent = 'Hide Cards';
+                this.querySelector('i').className = 'bi bi-chevron-up me-1';
+            } else {
+                gridCollapse.classList.add('d-none');
+                if (toggleGridText) toggleGridText.textContent = 'Card Grid';
+                this.querySelector('i').className = 'bi bi-grid-3x3-gap me-1';
+            }
+        });
+    }
+
+    // Form submit validation safeguard
+    const editForm = document.getElementById('editAuctionForm');
+    if (editForm) {
+        editForm.addEventListener('submit', function (e) {
+            const catVal = parseInt(hiddenCatInput ? hiddenCatInput.value : '0', 10);
+            if (!catVal || catVal <= 0) {
+                e.preventDefault();
+                alert('Please select an auction category before submitting.');
+                document.getElementById('categoryDropdownTrigger')?.focus();
+            }
+        });
+    }
+
+    // Auto-select initial assigned category on page load
+    const currentCatId = hiddenCatInput ? hiddenCatInput.value : '';
+    let initialItem = document.querySelector(`.category-select-item[data-cat-id="${currentCatId}"]`);
+    if (!initialItem && categoryOptions.length > 0) {
+        initialItem = categoryOptions[0];
+    }
+    if (initialItem) {
+        selectCategory(initialItem.dataset.catId, initialItem.dataset.catName, initialItem.dataset.catIcon);
     }
 });
 </script>

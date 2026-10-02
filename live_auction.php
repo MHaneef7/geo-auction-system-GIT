@@ -6,9 +6,22 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// Role switching
 if (isset($_GET['switch_role']) && in_array(strtolower($_GET['switch_role']), ['buyer', 'seller', 'admin'])) {
-    $_SESSION['role'] = strtolower($_GET['switch_role']);
+    $switched = strtolower($_GET['switch_role']);
+    $_SESSION['role'] = $switched;
+    if ($switched === 'admin') {
+        $_SESSION['user_id'] = 1;
+        $_SESSION['user_name'] = 'Admin User';
+        $_SESSION['email'] = 'admin@gmail.com';
+    } elseif ($switched === 'seller') {
+        $_SESSION['user_id'] = 2;
+        $_SESSION['user_name'] = 'Ghulam Fatima';
+        $_SESSION['email'] = 'ghulalmfatima@gmail.com';
+    } else {
+        $_SESSION['user_id'] = 3;
+        $_SESSION['user_name'] = 'aakash';
+        $_SESSION['email'] = 'aakash@gmail.com';
+    }
 }
 
 $is_authenticated = isset($_SESSION['user_id']) && !empty($_SESSION['user_id']);
@@ -39,7 +52,6 @@ $has_db = isset($conn) && $conn instanceof mysqli && !$conn->connect_error;
 $user_lat = isset($_SESSION['user_lat']) && is_numeric($_SESSION['user_lat']) ? (float)$_SESSION['user_lat'] : 25.3960;
 $user_lng = isset($_SESSION['user_lng']) && is_numeric($_SESSION['user_lng']) ? (float)$_SESSION['user_lng'] : 68.3578;
 
-// Ensure auto_bids table exists and clean any legacy empty statuses
 if ($has_db) {
     @$conn->query("
         CREATE TABLE IF NOT EXISTS `auto_bids` (
@@ -82,12 +94,15 @@ function getDistanceKm($lat1, $lon1, $lat2, $lon2) {
 function cleanImagePath($path) {
     if (empty($path)) return '';
     $path = trim((string)$path, " \t\n\r\0\x0B\"'[]\\");
-    $path = str_replace(['\\/', '//'], '/', $path);
-    $path = trim($path);
-    if (empty($path)) return '';
     if (preg_match('/^(https?:\/\/|\/\/|data:)/i', $path)) {
         return $path;
     }
+    if (preg_match('/^https?:\/[^\/]/i', $path)) {
+        return preg_replace('/^(https?):\/([^\/])/i', '$1://$2', $path);
+    }
+    $path = str_replace(['\\/', '//'], '/', $path);
+    $path = trim($path);
+    if (empty($path)) return '';
     $is_user_sub = (basename(dirname(__FILE__)) === 'user');
     if ($is_user_sub) {
         if (strpos($path, '../') === 0) {
@@ -127,28 +142,24 @@ function parseItemImages($conn, $item_id = 0, $imgField = '', $featuredField = '
     if (!empty($imgField)) {
         $raw = trim((string)$imgField);
         $decoded = json_decode($raw, true);
-        if (is_array($decoded)) {
-            foreach ($decoded as $p) {
-                $val = is_string($p) ? cleanImagePath($p) : (is_array($p) ? cleanImagePath($p['image_path'] ?? $p['url'] ?? '') : '');
-                if (!empty($val) && !in_array($val, $images)) $images[] = $val;
+            if (is_array($decoded)) {
+                foreach ($decoded as $p) {
+                    $val = is_string($p) ? cleanImagePath($p) : (is_array($p) ? cleanImagePath($p['image_path'] ?? $p['url'] ?? '') : '');
+                    if (!empty($val) && !in_array($val, $images)) $images[] = $val;
+                }
+            } else {
+                $parts = explode(',', $raw);
+                foreach ($parts as $p) {
+                    $val = cleanImagePath($p);
+                    if (!empty($val) && !in_array($val, $images)) $images[] = $val;
+                }
             }
-        } else {
-            $parts = explode(',', $raw);
-            foreach ($parts as $p) {
-                $val = cleanImagePath($p);
-                if (!empty($val) && !in_array($val, $images)) $images[] = $val;
-            }
-        }
     }
     if (empty($images)) {
         $images[] = 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?auto=format&fit=crop&w=800&q=80';
     }
     return $images;
 }
-
-/**
- * Send in-app notification
- */
 function sendNotification($conn, $to_user, $type, $title, $msg, $link = '') {
     if (!$conn || $to_user <= 0) return;
     try {
@@ -220,6 +231,12 @@ function runAutoBids($conn, $item_id, $current_highest, $exclude_uid = 0) {
 if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
     header('Content-Type: application/json; charset=utf-8');
     $action = $_POST['action'] ?? $_GET['action'] ?? '';
+
+    // Item Comments AJAX Actions Routing
+    if (in_array($action, ['add_comment', 'post_comment', 'fetch_comments', 'get_comments', 'get_card_comments'])) {
+        require __DIR__ . '/ajax_comment.php';
+        exit();
+    }
 
     // 1. Poll Status
     if ($action === 'poll_status') {
@@ -319,6 +336,15 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
         $next_min = $curr_price + $min_inc;
         $reserve_met = (empty($item['reserve_price']) || $curr_price >= (float)$item['reserve_price']);
 
+        $cm_cnt_stmt = mysqli_prepare($conn, "SELECT COUNT(id) AS total FROM item_comments WHERE item_id = ?");
+        $poll_comments = 0;
+        if ($cm_cnt_stmt) {
+            mysqli_stmt_bind_param($cm_cnt_stmt, "i", $poll_id);
+            mysqli_stmt_execute($cm_cnt_stmt);
+            $poll_comments = (int)mysqli_fetch_assoc(mysqli_stmt_get_result($cm_cnt_stmt))['total'];
+            mysqli_stmt_close($cm_cnt_stmt);
+        }
+
         echo json_encode([
             'success' => true,
             'current_price' => number_format($curr_price, 2),
@@ -328,6 +354,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
             'raw_next_min' => $next_min,
             'bid_count' => (int)$item['bid_count'],
             'watcher_count' => (int)$item['watcher_count'],
+            'total_comments' => $poll_comments,
             'end_time' => $effective_end,
             'is_closed' => $is_closed,
             'reserve_met' => $reserve_met,
@@ -663,83 +690,118 @@ if (isset($_GET['ajax']) && $_GET['ajax'] == '1') {
 // --------------------------------------------------------------------------
 $seller_message = '';
 $seller_success = false;
-if (($role === 'seller' || $role === 'admin') && $_SERVER['REQUEST_METHOD'] === 'POST') {
+
+if ($is_authenticated && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $post_item_id = (int)($_POST['item_id'] ?? 0);
 
-    if (isset($_POST['accept_bid']) && $has_db) {
-        $chk_stmt = mysqli_prepare($conn, "SELECT id FROM items WHERE id = ?" . ($role === 'seller' ? " AND seller_id = ?" : ""));
-        if ($role === 'seller') mysqli_stmt_bind_param($chk_stmt, "ii", $post_item_id, $user_id);
-        else mysqli_stmt_bind_param($chk_stmt, "i", $post_item_id);
-        mysqli_stmt_execute($chk_stmt);
-        if (mysqli_stmt_get_result($chk_stmt)->num_rows > 0) {
-            $bid_stmt = mysqli_prepare($conn, "SELECT id, user_id, bid_amount FROM bids WHERE item_id = ? ORDER BY bid_amount DESC LIMIT 1");
-            mysqli_stmt_bind_param($bid_stmt, "i", $post_item_id);
-            mysqli_stmt_execute($bid_stmt);
-            $bid_res = mysqli_stmt_get_result($bid_stmt);
-            if ($top_bid = mysqli_fetch_assoc($bid_res)) {
-                $winner_id = (int)$top_bid['user_id'];
-                $winning_bid_id = (int)$top_bid['id'];
-                $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'sold', winner_id = ?, winning_bid_id = ? WHERE id = ?");
-                mysqli_stmt_bind_param($up_item, "iii", $winner_id, $winning_bid_id, $post_item_id);
-                mysqli_stmt_execute($up_item);
-                mysqli_stmt_close($up_item);
-                
-                $up_bid = mysqli_prepare($conn, "UPDATE bids SET is_winning = 1, status = 'accepted' WHERE id = ?");
-                mysqli_stmt_bind_param($up_bid, "i", $winning_bid_id);
-                mysqli_stmt_execute($up_bid);
-                mysqli_stmt_close($up_bid);
-                
-                sendNotification($conn, $winner_id, 'auction', 'Bid Accepted!', "Congratulations! Your bid was accepted for lot #$post_item_id.", "live_auction.php?id=$post_item_id");
-                $seller_success = true;
-                $seller_message = "Bid accepted successfully! Item marked as sold.";
-            } else {
-                $seller_message = "No bids found to accept for this item.";
-            }
-            mysqli_stmt_close($bid_stmt);
-        }
-        mysqli_stmt_close($chk_stmt);
-    }
-    
-    if (isset($_POST['reject_bid']) && $has_db) {
-        $chk_stmt = mysqli_prepare($conn, "SELECT id FROM items WHERE id = ?" . ($role === 'seller' ? " AND seller_id = ?" : ""));
-        if ($role === 'seller') mysqli_stmt_bind_param($chk_stmt, "ii", $post_item_id, $user_id);
-        else mysqli_stmt_bind_param($chk_stmt, "i", $post_item_id);
-        mysqli_stmt_execute($chk_stmt);
-        if (mysqli_stmt_get_result($chk_stmt)->num_rows > 0) {
-            $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'ended' WHERE id = ?");
-            mysqli_stmt_bind_param($up_item, "i", $post_item_id);
-            mysqli_stmt_execute($up_item);
-            mysqli_stmt_close($up_item);
-            
-            $up_bids = mysqli_prepare($conn, "UPDATE bids SET status = 'rejected' WHERE item_id = ?");
-            mysqli_stmt_bind_param($up_bids, "i", $post_item_id);
-            mysqli_stmt_execute($up_bids);
-            mysqli_stmt_close($up_bids);
-
-            $seller_success = true;
-            $seller_message = "Auction bid rejected and auction ended.";
-        }
-        mysqli_stmt_close($chk_stmt);
-    }
-    
-    if (isset($_POST['delete_item']) && $has_db) {
-        $chk_stmt = mysqli_prepare($conn, "SELECT id FROM items WHERE id = ?" . ($role === 'seller' ? " AND seller_id = ?" : ""));
-        if ($role === 'seller') mysqli_stmt_bind_param($chk_stmt, "ii", $post_item_id, $user_id);
-        else mysqli_stmt_bind_param($chk_stmt, "i", $post_item_id);
+    if ($post_item_id > 0 && (isset($_POST['accept_bid']) || isset($_POST['reject_bid']) || isset($_POST['delete_item']))) {
+        // Fetch item to verify ownership and existing details
+        $chk_stmt = mysqli_prepare($conn, "SELECT id, seller_id, title, current_price, status, featured_image, images FROM items WHERE id = ?");
+        mysqli_stmt_bind_param($chk_stmt, "i", $post_item_id);
         mysqli_stmt_execute($chk_stmt);
         $res = mysqli_stmt_get_result($chk_stmt);
-        if ($row = mysqli_fetch_assoc($res)) {
-            $del_stmt = mysqli_prepare($conn, "UPDATE items SET is_deleted = 1, deleted_at = NOW(), deleted_by = ? WHERE id = ?");
-            mysqli_stmt_bind_param($del_stmt, "ii", $user_id, $post_item_id);
-            mysqli_stmt_execute($del_stmt);
-            mysqli_stmt_close($del_stmt);
-            
-            $seller_success = true;
-            $seller_message = "Listing soft-deleted successfully. It will no longer appear on the public marketplace.";
-        }
+        $item_to_manage = mysqli_fetch_assoc($res);
         mysqli_stmt_close($chk_stmt);
+
+        if (!$item_to_manage) {
+            $seller_message = "Auction lot #$post_item_id not found.";
+            $seller_success = false;
+        } elseif ($role !== 'admin' && (int)$item_to_manage['seller_id'] !== $user_id) {
+            $seller_message = "You are not authorized to manage lot #$post_item_id. Only the owner or an administrator can manage this lot.";
+            $seller_success = false;
+        } else {
+            // User is authorized (owner or admin)
+            if (isset($_POST['accept_bid']) && $has_db) {
+                // Fetch highest bid
+                $bid_stmt = mysqli_prepare($conn, "
+                    SELECT b.id, b.user_id, b.bid_amount, u.name, u.email 
+                    FROM bids b 
+                    JOIN users u ON b.user_id = u.id 
+                    WHERE b.item_id = ? 
+                    ORDER BY b.bid_amount DESC, b.id ASC 
+                    LIMIT 1
+                ");
+                mysqli_stmt_bind_param($bid_stmt, "i", $post_item_id);
+                mysqli_stmt_execute($bid_stmt);
+                $bid_res = mysqli_stmt_get_result($bid_stmt);
+                if ($top_bid = mysqli_fetch_assoc($bid_res)) {
+                    $winner_id = (int)$top_bid['user_id'];
+                    $winning_bid_id = (int)$top_bid['id'];
+                    $top_amount = (float)$top_bid['bid_amount'];
+
+                    // Mark item as sold
+                    $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'sold', winner_id = ?, winning_bid_id = ?, current_price = ? WHERE id = ?");
+                    mysqli_stmt_bind_param($up_item, "iidi", $winner_id, $winning_bid_id, $top_amount, $post_item_id);
+                    mysqli_stmt_execute($up_item);
+                    mysqli_stmt_close($up_item);
+
+                    // Mark winning bid as won/accepted
+                    $up_bid = mysqli_prepare($conn, "UPDATE bids SET is_winning = 1, bid_status = 'won', status = 'accepted' WHERE id = ?");
+                    mysqli_stmt_bind_param($up_bid, "i", $winning_bid_id);
+                    mysqli_stmt_execute($up_bid);
+                    mysqli_stmt_close($up_bid);
+
+                    // Mark other bids as lost/outbid
+                    $up_other = mysqli_prepare($conn, "UPDATE bids SET is_winning = 0, bid_status = 'lost', status = 'outbid' WHERE item_id = ? AND id != ?");
+                    mysqli_stmt_bind_param($up_other, "ii", $post_item_id, $winning_bid_id);
+                    mysqli_stmt_execute($up_other);
+                    mysqli_stmt_close($up_other);
+
+                    // Send notification to winner and seller
+                    $formatted_amount = number_format($top_amount, 2);
+                    sendNotification($conn, $winner_id, 'auction', 'Bid Accepted & Won!', "Congratulations! Your top bid of Rs. $formatted_amount on lot #$post_item_id ('" . addslashes($item_to_manage['title']) . "') has been accepted.", "live_auction.php?id=$post_item_id");
+                    sendNotification($conn, (int)$item_to_manage['seller_id'], 'auction', 'Top Bid Accepted', "Top bid of Rs. $formatted_amount for lot #$post_item_id was accepted and lot marked as Sold.", "live_auction.php?id=$post_item_id");
+
+                    $seller_success = true;
+                    $seller_message = "Top bid of Rs. $formatted_amount accepted successfully! The lot has been awarded and marked as Sold.";
+                    $item_id = $post_item_id;
+                } else {
+                    $seller_success = false;
+                    $seller_message = "No bids have been placed on this item yet. Cannot accept top bid.";
+                }
+                mysqli_stmt_close($bid_stmt);
+            }
+
+            if (isset($_POST['reject_bid']) && $has_db) {
+                // Mark item as ended
+                $up_item = mysqli_prepare($conn, "UPDATE items SET status = 'ended' WHERE id = ?");
+                mysqli_stmt_bind_param($up_item, "i", $post_item_id);
+                mysqli_stmt_execute($up_item);
+                mysqli_stmt_close($up_item);
+
+                // Reject all bids
+                $up_bids = mysqli_prepare($conn, "UPDATE bids SET is_winning = 0, bid_status = 'cancelled', status = 'rejected' WHERE item_id = ?");
+                mysqli_stmt_bind_param($up_bids, "i", $post_item_id);
+                mysqli_stmt_execute($up_bids);
+                mysqli_stmt_close($up_bids);
+
+                sendNotification($conn, (int)$item_to_manage['seller_id'], 'auction', 'Auction Closed', "Lot #$post_item_id ('" . addslashes($item_to_manage['title']) . "') was closed and bids were rejected.", "live_auction.php?id=$post_item_id");
+
+                $seller_success = true;
+                $seller_message = "Auction lot #$post_item_id has been closed and pending bids have been rejected.";
+                $item_id = $post_item_id;
+            }
+
+            if (isset($_POST['delete_item']) && $has_db) {
+                // Soft-delete: marks lot as cancelled & is_deleted = 1 with timestamp and user audit
+                $del_stmt = mysqli_prepare($conn, "UPDATE items SET is_deleted = 1, status = 'cancelled', deleted_at = NOW(), deleted_by = ? WHERE id = ?");
+                mysqli_stmt_bind_param($del_stmt, "ii", $user_id, $post_item_id);
+                mysqli_stmt_execute($del_stmt);
+                mysqli_stmt_close($del_stmt);
+
+                // Cancel all bids for this item
+                $del_bids = mysqli_prepare($conn, "UPDATE bids SET bid_status = 'cancelled', status = 'cancelled' WHERE item_id = ?");
+                mysqli_stmt_bind_param($del_bids, "i", $post_item_id);
+                mysqli_stmt_execute($del_bids);
+                mysqli_stmt_close($del_bids);
+
+                // Redirect cleanly
+                header("Location: live_auction.php?deleted=1&lot_id=" . $post_item_id);
+                exit();
+            }
+        }
     }
-} 
+}
 
 // --------------------------------------------------------------------------
 // Catalog Filtering & Active Lot Data Loading
@@ -804,8 +866,15 @@ if ($has_db) {
             if (mysqli_stmt_get_result($w_chk)->num_rows > 0) $is_watched = true;
             mysqli_stmt_close($w_chk);
         }
-        $w_cnt_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM wishlist WHERE item_id = " . (int)$current_item['id']);
-        if ($w_cnt_res) $watcher_count = (int)mysqli_fetch_assoc($w_cnt_res)['c'];
+        $w_cnt_stmt = mysqli_prepare($conn, "SELECT COUNT(*) AS c FROM wishlist WHERE item_id = ?");
+        if ($w_cnt_stmt) {
+            $cid = (int)$current_item['id'];
+            mysqli_stmt_bind_param($w_cnt_stmt, "i", $cid);
+            mysqli_stmt_execute($w_cnt_stmt);
+            $w_cnt_res = mysqli_stmt_get_result($w_cnt_stmt);
+            if ($w_cnt_res) $watcher_count = (int)mysqli_fetch_assoc($w_cnt_res)['c'];
+            mysqli_stmt_close($w_cnt_stmt);
+        }
     }
 
     $res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)");
@@ -909,6 +978,17 @@ function buildFilterUrl($remove_key = '', $current_get = []) {
     return 'live_auction.php?' . http_build_query($params);
 }
 
+// Fetch comment counts grouped by item_id
+$item_comment_counts = [];
+if ($has_db) {
+    $cc_res = mysqli_query($conn, "SELECT item_id, COUNT(id) AS total_comments FROM item_comments GROUP BY item_id");
+    if ($cc_res) {
+        while ($cc_row = mysqli_fetch_assoc($cc_res)) {
+            $item_comment_counts[(string)$cc_row['item_id']] = (int)$cc_row['total_comments'];
+        }
+    }
+}
+
 $catalog_list = [];
 if ($all_products_res) {
     mysqli_data_seek($all_products_res, 0);
@@ -917,9 +997,71 @@ if ($all_products_res) {
         if ($selected_radius > 0 && ($p['dist_km'] === null || $p['dist_km'] > $selected_radius)) {
             continue;
         }
+        $p['comment_count'] = $item_comment_counts[(string)$p['id']] ?? 0;
         $catalog_list[] = $p;
     }
 }
+
+// Current item comments for live stream
+$current_item_comment_count = $current_item ? ($item_comment_counts[(string)$current_item['id']] ?? 0) : 0;
+$current_item_comments = [];
+if ($has_db && $current_item && !empty($current_item['id'])) {
+    $c_stmt = mysqli_prepare($conn, "
+        SELECT c.*, u.name AS user_name, u.username, u.avatar, u.role AS user_role
+        FROM item_comments c
+        LEFT JOIN users u ON c.user_id = u.id
+        WHERE c.item_id = ?
+        ORDER BY c.created_at ASC, c.id ASC
+        LIMIT 100
+    ");
+    if ($c_stmt) {
+        $c_iid = (string)$current_item['id'];
+        mysqli_stmt_bind_param($c_stmt, "s", $c_iid);
+        mysqli_stmt_execute($c_stmt);
+        $c_res = mysqli_stmt_get_result($c_stmt);
+        while ($c_row = mysqli_fetch_assoc($c_res)) {
+            $current_item_comments[] = $c_row;
+        }
+        mysqli_stmt_close($c_stmt);
+    }
+}
+
+if (!function_exists('formatCommentTime')) {
+    function formatCommentTime($datetime) {
+        if (empty($datetime)) return 'Just now';
+        $time = is_numeric($datetime) ? (int)$datetime : strtotime($datetime);
+        if (!$time) return 'Just now';
+        $diff = time() - $time;
+        if ($diff < 5) return 'Just now';
+        if ($diff < 60) return $diff . 's ago';
+        if ($diff < 3600) return floor($diff / 60) . 'm ago';
+        if ($diff < 86400) return floor($diff / 3600) . 'h ago';
+        if ($diff < 604800) return floor($diff / 86400) . 'd ago';
+        return date('M d, Y', $time);
+    }
+}
+
+// Current logged-in user details for nested comment composer
+$current_user_avatar = '';
+$current_user_name = $_SESSION['name'] ?? 'Bidder';
+if ($is_authenticated && $has_db) {
+    if (!empty($_SESSION['avatar'])) {
+        $current_user_avatar = cleanImagePath($_SESSION['avatar']);
+    } else {
+        $u_stmt = mysqli_prepare($conn, "SELECT name, avatar FROM users WHERE id = ?");
+        if ($u_stmt) {
+            mysqli_stmt_bind_param($u_stmt, "i", $user_id);
+            mysqli_stmt_execute($u_stmt);
+            $u_row = mysqli_fetch_assoc(mysqli_stmt_get_result($u_stmt));
+            if ($u_row) {
+                if (!empty($u_row['name'])) $current_user_name = $u_row['name'];
+                if (!empty($u_row['avatar'])) $current_user_avatar = cleanImagePath($u_row['avatar']);
+            }
+            mysqli_stmt_close($u_stmt);
+        }
+    }
+}
+$current_user_initial = strtoupper(substr($current_user_name, 0, 1));
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -946,6 +1088,12 @@ if ($all_products_res) {
         .bid-input-error { border-color: #f43f5e !important; box-shadow: 0 0 0 3px rgba(244, 63, 94, 0.18) !important; animation: errorShake 0.3s ease-in-out; }
         .auction-modal-backdrop { opacity: 0; visibility: hidden; transition: opacity 0.25s ease, visibility 0.25s ease; }
         .auction-modal-backdrop.is-open { opacity: 1; visibility: visible; }
+        .scrollbar-thin::-webkit-scrollbar { width: 5px; height: 5px; }
+        .scrollbar-thin::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 9999px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        @keyframes commentEntryFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-comment-entry { animation: commentEntryFade 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen flex flex-col">
@@ -1096,7 +1244,7 @@ if ($all_products_res) {
         
         $gallery_images = parseItemImages($conn, (int)$current_item['id'], $current_item['images'] ?? '', $current_item['featured_image'] ?? '');
         $main_img = $gallery_images[0];
-        $is_owner_seller = ($role === 'seller' && (int)($current_item['seller_id'] ?? 0) === $user_id) || $role === 'admin';
+        $is_owner_seller = ($user_id > 0 && (int)($current_item['seller_id'] ?? 0) === $user_id) || $role === 'admin';
         $dist_km = getDistanceKm($user_lat, $user_lng, $current_item['location_lat'] ?? 0, $current_item['location_lng'] ?? 0);
         $effective_item_end = (!empty($current_item['extended_time']) && $current_item['extended_time'] != '0000-00-00 00:00:00' && strtotime($current_item['extended_time']) > strtotime($current_item['end_time']))
             ? $current_item['extended_time']
@@ -1111,203 +1259,245 @@ if ($all_products_res) {
             </div>
         </div>
     <?php endif; ?>
-    <section class="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
-        <div class="grid grid-cols-1 lg:grid-cols-12">
-            <div class="lg:col-span-5 p-5 bg-slate-50/70 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col justify-between">
-                <div class="space-y-3">
-                    <div class="relative h-64 md:h-80 bg-slate-200 rounded-xl overflow-hidden shadow-inner group">
-                        <img id="mainImage" src="<?php echo htmlspecialchars($main_img); ?>" alt="<?php echo htmlspecialchars($current_item['title']); ?>" class="w-full h-full object-cover transition duration-300">
-                        
-                        <div class="absolute top-3 left-3 flex items-center gap-2 px-3 py-1 rounded-full bg-rose-600/90 backdrop-blur-sm text-white text-[11px] font-bold uppercase tracking-wider shadow">
-                            <span class="w-2 h-2 rounded-full bg-white live-dot"></span> Live Auction
-                        </div>
+    <section class="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-sm p-4 sm:p-6 mb-6 space-y-6">
+        <!-- 1. BAYUT-INSPIRED PROPERTY IMAGE GALLERY & SLIDER -->
+        <?php include __DIR__ . '/includes/components/property_gallery.php'; ?>
 
-                        <button type="button" onclick="toggleWatchlist(<?php echo $current_item['id']; ?>)" id="watchlistBtn" 
-                                class="absolute top-3 right-3 w-9 h-9 rounded-full bg-white/90 hover:bg-white text-rose-500 shadow flex items-center justify-center transition cursor-pointer" title="Watchlist">
-                            <i class="fa-<?php echo $is_watched ? 'solid' : 'regular'; ?> fa-heart text-sm" id="watchlistIcon"></i>
-                        </button>
-
-                        <?php if (count($gallery_images) > 1): ?>
-                            <button id="prevBtn" type="button" class="absolute left-2.5 top-1/2 -translate-y-1/2 bg-black/40 hover:bg-black/70 text-white w-9 h-9 rounded-full transition flex items-center justify-center backdrop-blur-sm cursor-pointer" aria-label="Previous image">
-                                <i class="fa-solid fa-chevron-left text-xs"></i>
-                            </button>
-                            <button id="nextBtn" type="button" class="absolute right-2.5 top-1/2 -translate-y-1/2 bg-black/40 hover:bg-black/70 text-white w-9 h-9 rounded-full transition flex items-center justify-center backdrop-blur-sm cursor-pointer" aria-label="Next image">
-                                <i class="fa-solid fa-chevron-right text-xs"></i>
-                            </button>
-                        <?php endif; ?>
-
-                        <div class="absolute bottom-3 left-3 right-3 flex items-center justify-between px-3 py-1.5 rounded-lg bg-slate-900/80 backdrop-blur-xs text-white text-xs">
-                            <span class="flex items-center gap-1.5 font-medium truncate">
-                                📍 <?php echo htmlspecialchars($current_item['location_area'] ?? ($current_item['location_city'] ?? 'Qasimabad')); ?>
-                            </span>
-                            <?php if ($dist_km !== null): ?>
-                                <span class="font-bold text-emerald-400 shrink-0">🚗 <?php echo $dist_km; ?> km away</span>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-
-                    <?php if (count($gallery_images) > 1): ?>
-                        <div class="thumbnail-row flex items-center gap-2.5 overflow-x-auto pb-1 pt-1">
-                            <?php foreach ($gallery_images as $index => $img): ?>
-                                <img src="<?php echo htmlspecialchars($img); ?>" 
-                                     alt="Thumbnail <?php echo $index + 1; ?>"
-                                     onclick="setMainImage('<?php echo htmlspecialchars(addslashes($img)); ?>', this)" 
-                                     class="thumbnail-img w-16 h-16 rounded-lg object-cover cursor-pointer border-2 transition shrink-0 <?php echo $index === 0 ? 'active-thumb border-emerald-600' : 'border-slate-200 hover:border-slate-400'; ?>">
-                            <?php endforeach; ?>
-                        </div>
-                    <?php endif; ?>
-                </div>
-
-                <div class="mt-4 pt-4 border-t border-slate-200 grid grid-cols-2 gap-3 text-xs">
-                    <div class="bg-white p-2.5 rounded-lg border border-slate-200/80">
-                        <span class="text-slate-400 block font-medium">Lot Identifier</span>
-                        <p class="font-bold text-slate-800 mt-0.5">#<?php echo htmlspecialchars($current_item['auction_code'] ?? ('LOT-'.$current_item['id'])); ?></p>
-                    </div>
-                    <div class="bg-white p-2.5 rounded-lg border border-slate-200/80">
-                        <span class="text-slate-400 block font-medium">Verified Seller</span>
-                        <p class="font-bold text-slate-800 mt-0.5"><?php echo htmlspecialchars($current_item['seller_name'] ?? 'Authorized Vendor'); ?></p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="lg:col-span-7 p-6 sm:p-8 flex flex-col justify-between">
+        <!-- 2. PROPERTY DETAILS & LIVE BIDDING CONSOLE (2-COLUMN ARCHITECTURE) -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 pt-2 border-t border-slate-100">
+            
+            <!-- LEFT COLUMN: PROPERTY INFORMATION, SPECS & BID FEED (7 COLS) -->
+            <div class="lg:col-span-7 space-y-6">
                 <div>
-                    <div class="flex items-start justify-between gap-4">
-                        <div>
-                            <div class="flex items-center gap-2">
-                                <span class="inline-block text-xs font-bold text-emerald-700 uppercase tracking-wider bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-md">
-                                    Lot #<?php echo htmlspecialchars($current_item['auction_code'] ?? ('LOT-'.$current_item['id'])); ?>
-                                </span>
-                                <span id="reserveStatusBadge" class="text-xs font-bold px-2.5 py-0.5 rounded-md border <?php echo $reserve_met ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'; ?>">
-                                    <?php echo $reserve_met ? 'Reserve Price Met' : 'Reserve Price Not Met'; ?>
-                                </span>
-                                <span class="text-[11px] text-slate-500 font-semibold bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
-                                    <i class="fa-solid fa-eye text-slate-400 mr-1"></i><span id="watcherCountDisplay"><?php echo $watcher_count; ?></span> watchers
-                                </span>
-                            </div>
-                            <h1 class="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 mt-2 <?php echo $is_current_deleted ? 'line-through text-rose-600' : ''; ?>">
-                                <?php echo htmlspecialchars($current_item['title']); ?>
-                            </h1>
-                        </div>
-                        <div class="text-right shrink-0 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5">
-                            <span class="text-xs text-slate-400 font-medium block">Current Highest Bid</span>
-                            <span class="text-2xl font-extrabold text-emerald-600">
-                                Rs. <span id="currentPriceDisplay"><?php echo number_format($display_price, 2); ?></span>
-                            </span>
-                            <span class="text-[11px] text-slate-500 block mt-0.5">
-                                Min Inc: Rs. <?php echo number_format($min_inc, 0); ?>
-                            </span>
-                        </div>
+                    <div class="flex items-center gap-2 flex-wrap mb-2">
+                        <span class="inline-block text-xs font-extrabold text-emerald-800 uppercase tracking-wider bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-lg">
+                            Lot #<?php echo htmlspecialchars($current_item['auction_code'] ?? ('LOT-'.$current_item['id'])); ?>
+                        </span>
+                        <span id="reserveStatusBadge" class="text-xs font-bold px-3 py-1 rounded-lg border <?php echo $reserve_met ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'; ?>">
+                            <?php echo $reserve_met ? 'Reserve Price Met' : 'Reserve Price Not Met'; ?>
+                        </span>
+                        <span class="text-xs text-slate-500 font-semibold bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200 flex items-center gap-1.5">
+                            <i class="fa-solid fa-eye text-slate-400"></i>
+                            <span id="watcherCountDisplay"><?php echo $watcher_count; ?></span> watchers
+                        </span>
                     </div>
 
-                    <p class="text-sm text-slate-600 mt-4 leading-relaxed whitespace-pre-line">
+                    <h1 class="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900 mt-1 <?php echo $is_current_deleted ? 'line-through text-rose-600' : ''; ?>">
+                        <?php echo htmlspecialchars($current_item['title']); ?>
+                    </h1>
+
+                    <p class="text-xs text-slate-500 mt-2 flex items-center gap-2 flex-wrap">
+                        <span class="inline-flex items-center gap-1 text-slate-700 font-medium">
+                            <i class="fa-solid fa-location-dot text-emerald-600"></i>
+                            <?php echo htmlspecialchars($current_item['location_area'] ?? ($current_item['location_city'] ?? 'Hyderabad')); ?>
+                        </span>
+                        <span class="text-slate-300">&bull;</span>
+                        <span>Seller: <strong class="text-slate-800"><?php echo htmlspecialchars($current_item['seller_name'] ?? 'Authorized Vendor'); ?></strong></span>
+                    </p>
+                </div>
+
+                <!-- Description Card -->
+                <div class="bg-slate-50/70 border border-slate-200/80 rounded-2xl p-5">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1.5">
+                        <i class="fa-solid fa-align-left text-xs"></i> Property Overview & Auction Details
+                    </h3>
+                    <p class="text-sm text-slate-700 leading-relaxed whitespace-pre-line">
                         <?php echo htmlspecialchars($current_item['description']); ?>
                     </p>
+                </div>
 
-                    <div class="grid grid-cols-3 gap-3 mt-6 p-4 rounded-xl bg-slate-50 border border-slate-200 text-center">
-                        <div>
-                            <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Next Allowed Bid</span>
-                            <p class="text-base font-bold text-slate-800 mt-0.5" id="nextMinBidDisplay">Rs. <?php echo number_format($next_min_bid, 2); ?></p>
-                        </div>
-                        <div>
-                            <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Total Bids Placed</span>
-                            <p class="text-base font-bold text-slate-800 mt-0.5" id="bidCountDisplay"><?php echo (int)($current_item['bid_count'] ?? 0); ?></p>
-                        </div>
-                        <div>
-                            <span class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Time Remaining</span>
-                            <p class="text-base font-bold text-rose-600 mt-0.5" id="timerDisplay">Calculating...</p>
-                        </div>
+                <!-- Property Specifications Badges -->
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                    <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                        <span class="text-slate-400 block font-medium">Lot Identifier</span>
+                        <p class="font-extrabold text-slate-900 mt-0.5">#<?php echo htmlspecialchars($current_item['auction_code'] ?? ('LOT-'.$current_item['id'])); ?></p>
                     </div>
+                    <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                        <span class="text-slate-400 block font-medium">Opening Bid</span>
+                        <p class="font-extrabold text-slate-900 mt-0.5">Rs. <?php echo number_format((float)$current_item['starting_price'], 0); ?></p>
+                    </div>
+                    <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                        <span class="text-slate-400 block font-medium">Min Increment</span>
+                        <p class="font-extrabold text-emerald-700 mt-0.5">Rs. <?php echo number_format($min_inc, 0); ?></p>
+                    </div>
+                    <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                        <span class="text-slate-400 block font-medium">Verified Seller</span>
+                        <p class="font-extrabold text-slate-900 mt-0.5 truncate"><?php echo htmlspecialchars($current_item['seller_name'] ?? 'Authorized Vendor'); ?></p>
+                    </div>
+                </div>
 
-                    <div class="mt-6">
-                        <h3 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5 flex items-center gap-1.5">
-                            <i class="fa-solid fa-clock-rotate-left text-xs"></i> Recent Bid Feed
-                        </h3>
-                        <div class="space-y-2 max-h-40 overflow-y-auto pr-1" id="bidHistoryFeed">
-                            <?php if ($bids_history_res && mysqli_num_rows($bids_history_res) > 0): ?>
-                                <?php while($bid = mysqli_fetch_assoc($bids_history_res)): 
-                                    $parts = explode(' ', trim($bid['bidder_name']));
-                                    $masked_name = htmlspecialchars($parts[0]) . (count($parts) > 1 ? ' ' . substr($parts[1], 0, 1) . '***' : ' ***');
-                                ?>
-                                    <div class="flex items-center justify-between p-2.5 rounded-lg bg-slate-50 border border-slate-100 text-xs">
-                                        <div class="flex items-center gap-2.5">
-                                            <div class="w-7 h-7 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold text-[11px]">
-                                                <?php echo strtoupper(substr($bid['bidder_name'] ?? 'B', 0, 1)); ?>
-                                            </div>
-                                            <div>
-                                                <span class="font-semibold text-slate-800"><?php echo $masked_name; ?></span>
-                                                <span class="text-[10px] text-slate-400 block"><?php echo date('M d, h:i A', strtotime($bid['created_at'])); ?></span>
-                                            </div>
+                <!-- Live Bid Activity Feed -->
+                <div>
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5 flex items-center justify-between">
+                        <span class="flex items-center gap-1.5">
+                            <i class="fa-solid fa-clock-rotate-left text-xs"></i> Live Bid Activity Feed
+                        </span>
+                        <span class="text-[11px] text-slate-400 font-normal">Real-time updates</span>
+                    </h3>
+                    <div class="space-y-2 max-h-52 overflow-y-auto pr-1" id="bidHistoryFeed">
+                        <?php if ($bids_history_res && mysqli_num_rows($bids_history_res) > 0): ?>
+                            <?php while($bid = mysqli_fetch_assoc($bids_history_res)): 
+                                $parts = explode(' ', trim($bid['bidder_name']));
+                                $masked_name = htmlspecialchars($parts[0]) . (count($parts) > 1 ? ' ' . substr($parts[1], 0, 1) . '***' : ' ***');
+                            ?>
+                                <div class="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200/80 text-xs hover:bg-white transition">
+                                    <div class="flex items-center gap-3">
+                                        <div class="w-8 h-8 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold text-xs shadow-2xs">
+                                            <?php echo strtoupper(substr($bid['bidder_name'] ?? 'B', 0, 1)); ?>
                                         </div>
-                                        <div class="text-right">
-                                            <span class="font-bold text-emerald-700 text-sm">Rs. <?php echo number_format($bid['bid_amount'], 2); ?></span>
+                                        <div>
+                                            <span class="font-bold text-slate-900"><?php echo $masked_name; ?></span>
+                                            <span class="text-[10px] text-slate-400 block"><?php echo date('M d, h:i A', strtotime($bid['created_at'])); ?></span>
                                         </div>
                                     </div>
-                                <?php endwhile; ?>
-                            <?php else: ?>
-                                <p class="text-xs text-slate-400 italic py-2" id="noBidsNotice">No bids recorded yet. Place the opening bid!</p>
-                            <?php endif; ?>
+                                    <div class="text-right">
+                                        <span class="font-extrabold text-emerald-700 text-sm">Rs. <?php echo number_format($bid['bid_amount'], 2); ?></span>
+                                    </div>
+                                </div>
+                            <?php endwhile; ?>
+                        <?php else: ?>
+                            <p class="text-xs text-slate-400 italic py-3 text-center bg-slate-50 rounded-xl border border-dashed border-slate-200" id="noBidsNotice">
+                                No bids recorded yet. Be the first to place an opening bid!
+                            </p>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- RIGHT COLUMN: LIVE BIDDING TERMINAL & PRICING CONSOLE (5 COLS) -->
+            <div class="lg:col-span-5 space-y-4">
+                
+                <!-- Main Price & Countdown Card -->
+                <div class="bg-gradient-to-br from-slate-900 to-slate-950 text-white rounded-3xl p-6 shadow-xl border border-slate-800 space-y-5">
+                    
+                    <div class="flex items-start justify-between gap-3 border-b border-slate-800 pb-4">
+                        <div>
+                            <span class="text-xs text-slate-400 font-semibold uppercase tracking-wider block">Current Highest Bid</span>
+                            <div class="text-3xl font-black text-emerald-400 tracking-tight mt-0.5">
+                                Rs. <span id="currentPriceDisplay"><?php echo number_format($display_price, 2); ?></span>
+                            </div>
+                        </div>
+                        <div class="text-right">
+                            <span class="text-[11px] text-slate-400 font-medium block">Min Increment</span>
+                            <span class="text-xs font-bold text-slate-200 block mt-0.5">Rs. <?php echo number_format($min_inc, 0); ?></span>
                         </div>
                     </div>
-                </div> 
 
-                <div class="mt-8 pt-6 border-t border-slate-200">
+                    <!-- 3-Stats Grid -->
+                    <div class="grid grid-cols-3 gap-2 text-center bg-slate-800/60 rounded-2xl p-3 border border-slate-700/50">
+                        <div>
+                            <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">Next Allowed</span>
+                            <strong class="text-xs font-bold text-slate-100 mt-0.5 block truncate" id="nextMinBidDisplay">Rs. <?php echo number_format($next_min_bid, 2); ?></strong>
+                        </div>
+                        <div class="border-x border-slate-700/60">
+                            <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">Bids Placed</span>
+                            <strong class="text-sm font-black text-slate-100 mt-0.5 block" id="bidCountDisplay"><?php echo (int)($current_item['bid_count'] ?? 0); ?></strong>
+                        </div>
+                        <div>
+                            <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block">Closing In</span>
+                            <strong class="text-xs font-bold text-rose-400 mt-0.5 block" id="timerDisplay">Calculating...</strong>
+                        </div>
+                    </div>
+
+                    <!-- Bidding Form / Status Area -->
                     <?php if ($is_owner_seller): ?>
-                        <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
-                            <div class="flex items-center justify-between">
-                                <span class="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                                    <i class="fa-solid fa-crown text-amber-500"></i> Seller Lot Management
-                                </span>
-                                <span class="text-[11px] text-slate-500">You are the seller of this item</span>
+                        <div class="p-5 rounded-2xl bg-slate-800/90 border border-slate-700/80 shadow-md space-y-4">
+                            <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-700/60">
+                                <div>
+                                    <span class="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                                        <i class="fa-solid fa-crown text-amber-400"></i> Seller Lot Management
+                                    </span>
+                                    <p class="text-[11px] text-slate-400 mt-0.5">Control panel for lot #<?php echo $current_item['id']; ?></p>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <?php if ($is_current_deleted): ?>
+                                        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-rose-950/80 text-rose-300 border border-rose-800 flex items-center gap-1.5">
+                                            <i class="fa-solid fa-ban text-rose-400"></i> Soft Deleted
+                                        </span>
+                                    <?php elseif ($current_item['status'] === 'sold'): ?>
+                                        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center gap-1.5">
+                                            <i class="fa-solid fa-check-circle text-emerald-400"></i> Sold & Closed
+                                        </span>
+                                    <?php elseif ($current_item['status'] === 'ended'): ?>
+                                        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-slate-700 text-slate-300 border border-slate-600 flex items-center gap-1.5">
+                                            <i class="fa-solid fa-lock text-slate-400"></i> Closed / Ended
+                                        </span>
+                                    <?php else: ?>
+                                        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800 flex items-center gap-1.5">
+                                            <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span> Active Live
+                                        </span>
+                                    <?php endif; ?>
+                                </div>
                             </div>
-                            <form method="POST" action="" class="flex flex-wrap items-center gap-2">
+
+                            <?php if (!empty($seller_message)): ?>
+                                <div class="p-3.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 <?php echo $seller_success ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800' : 'bg-rose-950/60 text-rose-300 border border-rose-800'; ?>">
+                                    <i class="fa-solid <?php echo $seller_success ? 'fa-circle-check text-emerald-400 text-base' : 'fa-circle-exclamation text-rose-400 text-base'; ?> shrink-0"></i>
+                                    <div><?php echo htmlspecialchars($seller_message); ?></div>
+                                </div>
+                            <?php endif; ?>
+
+                            <form method="POST" action="?id=<?php echo $current_item['id']; ?>" class="space-y-3">
                                 <input type="hidden" name="item_id" value="<?php echo $current_item['id']; ?>">
                                 
-                                <button type="submit" name="accept_bid" onclick="return confirm('Accept the highest bid and mark this auction as sold?');" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer">
-                                    <i class="fa-solid fa-check"></i> Accept Top Bid
-                                </button>
-                                
-                                <button type="submit" name="reject_bid" onclick="return confirm('Reject bids and close this auction?');" class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer">
-                                    <i class="fa-solid fa-ban"></i> Reject & Close
-                                </button>
-                                
-                                <?php if (!$is_current_deleted): ?>
-                                    <button type="submit" name="delete_item" onclick="return confirm('Soft-delete this auction listing? It will immediately disappear from the public marketplace.');" class="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer">
-                                        <i class="fa-solid fa-trash-alt"></i> Soft Delete Lot
+                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 w-full">
+                                    <!-- Accept Top Bid Button -->
+                                    <button type="submit" name="accept_bid" 
+                                        <?php echo ($current_item['status'] === 'sold' || $is_current_deleted) ? 'disabled' : ''; ?>
+                                        onclick="return confirm('Accept the highest bid and mark this lot as sold?');" 
+                                        class="w-full h-11 px-3 py-2.5 rounded-xl font-bold text-xs tracking-wider uppercase transition-all duration-200 flex items-center justify-center gap-2 shadow-xs cursor-pointer <?php echo ($current_item['status'] === 'sold' || $is_current_deleted) ? 'bg-slate-700/60 text-slate-500 border border-slate-700 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white border border-emerald-500 shadow-emerald-900/30'; ?>">
+                                        <i class="fa-solid fa-check-circle text-sm"></i>
+                                        <span>Accept Top Bid</span>
                                     </button>
-                                <?php else: ?>
-                                    <span class="px-3 py-1.5 bg-rose-100 text-rose-700 rounded-lg text-xs font-bold flex items-center gap-1">
-                                        <i class="fa-solid fa-ban"></i> Soft Deleted
-                                    </span>
-                                <?php endif; ?>
+                                    
+                                    <!-- Reject & Close Button -->
+                                    <button type="submit" name="reject_bid" 
+                                        <?php echo ($current_item['status'] === 'ended' || $current_item['status'] === 'sold' || $is_current_deleted) ? 'disabled' : ''; ?>
+                                        onclick="return confirm('Reject bids and close this auction lot?');" 
+                                        class="w-full h-11 px-3 py-2.5 rounded-xl font-bold text-xs tracking-wider uppercase transition-all duration-200 flex items-center justify-center gap-2 shadow-xs cursor-pointer <?php echo ($current_item['status'] === 'ended' || $current_item['status'] === 'sold' || $is_current_deleted) ? 'bg-slate-700/60 text-slate-500 border border-slate-700 cursor-not-allowed' : 'bg-amber-600 hover:bg-amber-700 active:scale-[0.98] text-white border border-amber-500 shadow-amber-900/30'; ?>">
+                                        <i class="fa-solid fa-ban text-sm"></i>
+                                        <span>Reject & Close</span>
+                                    </button>
+                                    
+                                    <!-- Delete Lot Button -->
+                                    <button type="submit" name="delete_item" 
+                                        <?php echo $is_current_deleted ? 'disabled' : ''; ?>
+                                        onclick="return confirm('Are you sure you want to soft-delete this lot? It will immediately disappear from the public live auction.');" 
+                                        class="w-full h-11 px-3 py-2.5 rounded-xl font-bold text-xs tracking-wider uppercase transition-all duration-200 flex items-center justify-center gap-2 shadow-xs cursor-pointer <?php echo $is_current_deleted ? 'bg-slate-700/60 text-slate-500 border border-slate-700 cursor-not-allowed' : 'bg-rose-600 hover:bg-rose-700 active:scale-[0.98] text-white border border-rose-500 shadow-rose-900/30'; ?>">
+                                        <i class="fa-solid fa-trash-can text-sm"></i>
+                                        <span>Delete Lot</span>
+                                    </button>
+                                </div>
                             </form>
                         </div>
                     <?php elseif ($is_current_deleted): ?>
-                        <div class="p-4 rounded-xl bg-rose-50 border border-rose-200 text-center text-rose-700 font-semibold text-sm">
-                            <i class="fa-solid fa-ban text-rose-600 mr-2"></i> Bidding is disabled because this auction lot was withdrawn/soft-deleted.
+                        <div class="p-4 rounded-2xl bg-rose-950/60 border border-rose-800 text-center text-rose-300 font-semibold text-xs">
+                            <i class="fa-solid fa-ban text-rose-400 mr-1.5"></i> Bidding is disabled because this auction lot was withdrawn.
                         </div>
                     <?php elseif ($current_item['status'] === 'active'): ?>
                         <div class="space-y-3">
-                            <!-- Quick Bid Increment Buttons (+Min, +500, +1k, +5k) -->
-                            <div class="flex items-center gap-1.5 flex-wrap text-xs pb-1">
+                            <!-- Quick Bid Pills -->
+                            <div class="flex items-center gap-1.5 flex-wrap text-xs">
                                 <span class="text-slate-400 font-semibold text-[11px] mr-1">Quick Bid:</span>
-                                <button type="button" onclick="setQuickIncrement(0)" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 border border-slate-200 text-xs font-semibold transition cursor-pointer">
-                                    Min Bid
+                                <button type="button" onclick="setQuickIncrement(0)" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-emerald-600 text-slate-200 text-xs font-semibold transition cursor-pointer border border-slate-700">
+                                    Min
                                 </button>
-                                <button type="button" onclick="setQuickIncrement(500)" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 border border-slate-200 text-xs font-semibold transition cursor-pointer">
+                                <button type="button" onclick="setQuickIncrement(500)" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-emerald-600 text-slate-200 text-xs font-semibold transition cursor-pointer border border-slate-700">
                                     +Rs. 500
                                 </button>
-                                <button type="button" onclick="setQuickIncrement(1000)" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 border border-slate-200 text-xs font-semibold transition cursor-pointer">
+                                <button type="button" onclick="setQuickIncrement(1000)" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-emerald-600 text-slate-200 text-xs font-semibold transition cursor-pointer border border-slate-700">
                                     +Rs. 1,000
                                 </button>
-                                <button type="button" onclick="setQuickIncrement(5000)" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 border border-slate-200 text-xs font-semibold transition cursor-pointer">
+                                <button type="button" onclick="setQuickIncrement(5000)" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-emerald-600 text-slate-200 text-xs font-semibold transition cursor-pointer border border-slate-700">
                                     +Rs. 5,000
                                 </button>
                             </div>
 
-                            <form id="bidForm" class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                            <!-- Bid Form -->
+                            <form id="bidForm" class="flex flex-col gap-2.5">
                                 <input type="hidden" name="item_id" id="currentLotId" value="<?php echo $current_item['id']; ?>">
-                                <div class="relative flex-1">
+                                <div class="relative">
                                     <span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">Rs.</span>
                                     <input type="number" 
                                            step="10" 
@@ -1316,37 +1506,50 @@ if ($all_products_res) {
                                            placeholder="Enter at least Rs. <?php echo number_format($next_min_bid, 2); ?>" 
                                            required 
                                            min="<?php echo $next_min_bid; ?>" 
-                                           class="w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-4 py-3 text-sm font-semibold text-slate-900 focus:outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 transition">
+                                           class="w-full bg-slate-800 border border-slate-700 text-white rounded-xl pl-10 pr-4 py-3 text-sm font-semibold focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition">
                                 </div>
-                                <button type="submit" id="bidSubmitBtn" class="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm rounded-xl transition shadow hover:shadow-md shrink-0 flex items-center justify-center gap-2 active:scale-95 cursor-pointer">
-                                    <i class="fa-solid fa-gavel text-xs"></i> Submit Bid
+                                <button type="submit" id="bidSubmitBtn" class="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-sm rounded-xl transition shadow-lg flex items-center justify-center gap-2 active:scale-95 cursor-pointer">
+                                    <i class="fa-solid fa-gavel text-xs"></i> Place Live Bid Now
                                 </button>
                             </form>
+
+                            <!-- Secondary Actions: Auto-Bid, Buy It Now, Message Seller -->
                             <div class="flex items-center gap-2 pt-1 flex-wrap">
-                                <button type="button" onclick="openAutoBidPrompt(<?php echo $current_item['id']; ?>)" class="px-3.5 py-1.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition flex items-center gap-1.5 cursor-pointer">
-                                    <i class="fa-solid fa-robot text-emerald-600"></i> Setup Auto-Bid (Bidbot)
+                                <button type="button" onclick="openAutoBidPrompt(<?php echo $current_item['id']; ?>)" class="flex-1 min-w-[140px] py-2 px-3 text-xs font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl transition flex items-center justify-center gap-1.5 border border-slate-700 cursor-pointer">
+                                    <i class="fa-solid fa-robot text-emerald-400"></i> Setup Auto-Bid
                                 </button>
 
                                 <?php if (!empty($current_item['buy_it_now_price']) && (float)$current_item['buy_it_now_price'] > 0): ?>
                                     <button type="button" onclick="confirmBuyItNow(<?php echo $current_item['id']; ?>, <?php echo (float)$current_item['buy_it_now_price']; ?>)" 
-                                            class="px-4 py-1.5 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition shadow-xs flex items-center gap-1.5 cursor-pointer">
-                                        <i class="fa-solid fa-bolt"></i> Buy It Now for Rs. <?php echo number_format($current_item['buy_it_now_price'], 0); ?>
+                                            class="flex-1 min-w-[140px] py-2 px-3 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white rounded-xl transition shadow-xs flex items-center justify-center gap-1.5 cursor-pointer">
+                                        <i class="fa-solid fa-bolt"></i> Buy Now: Rs. <?php echo number_format($current_item['buy_it_now_price'], 0); ?>
                                     </button>
                                 <?php endif; ?>
+
                                 <?php if (!empty($current_item['seller_id']) && (int)$current_item['seller_id'] !== $user_id): ?>
                                     <a href="messages.php?user_id=<?php echo (int)$current_item['seller_id']; ?>&item_id=<?php echo (int)$current_item['id']; ?>" 
-                                       class="px-3.5 py-1.5 text-xs font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg transition flex items-center gap-1.5 shadow-2xs text-decoration-none"
-                                       title="Send direct message to seller">
-                                        <i class="fa-solid fa-message text-emerald-600"></i> Message Seller
+                                       class="w-full py-2 px-3 text-xs font-bold bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-800 rounded-xl transition flex items-center justify-center gap-1.5 shadow-2xs text-decoration-none">
+                                        <i class="fa-solid fa-message text-emerald-400"></i> Message Seller Directly
                                     </a>
                                 <?php endif; ?>
                             </div>
                         </div>
                     <?php else: ?>
-                        <div class="p-4 bg-slate-100 rounded-xl text-center text-sm font-semibold text-slate-600 border border-slate-200">
-                            <i class="fa-solid fa-lock mr-2 text-slate-400"></i> This auction is <?php echo htmlspecialchars($current_item['status']); ?>. Bidding is now closed.
+                        <div class="p-4 bg-slate-800/80 rounded-2xl text-center text-xs font-semibold text-slate-400 border border-slate-700">
+                            <i class="fa-solid fa-lock mr-1.5 text-slate-500"></i> This auction is <?php echo htmlspecialchars($current_item['status']); ?>. Bidding is closed.
                         </div>
                     <?php endif; ?>
+                </div>
+
+                <!-- Safe Transaction & Security Guarantee Card -->
+                <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs text-slate-600 space-y-2">
+                    <div class="flex items-center gap-2 font-bold text-slate-800">
+                        <i class="fa-solid fa-shield-halved text-emerald-600 text-sm"></i>
+                        <span>Buyer Protection & Escrow Guarantee</span>
+                    </div>
+                    <p class="text-[11px] leading-relaxed text-slate-500">
+                        All property bids are legally binding and protected under Geo Auction System escrow terms with verified land department title verification.
+                    </p>
                 </div>
             </div>
         </div>
@@ -1413,16 +1616,21 @@ if ($all_products_res) {
                             <h4 class="text-xs font-bold text-slate-900 line-clamp-1 group-hover:text-emerald-600 transition">
                                 <?php echo htmlspecialchars($prod['title']); ?>
                             </h4>
-                            <span class="text-[10px] text-slate-400 mt-1 block flex items-center gap-1">
-                                <i class="fa-solid fa-gavel text-[9px]"></i> <?php echo (int)($prod['bid_count'] ?? 0); ?> bids placed
-                            </span>
+                            <div class="flex items-center justify-between text-[10px] text-slate-400 mt-1.5 pt-1.5 border-t border-slate-100">
+                                <span class="flex items-center gap-1">
+                                    <i class="fa-solid fa-gavel text-[9px] text-slate-400"></i> <?php echo (int)($prod['bid_count'] ?? 0); ?> bids
+                                </span>
+                                <span class="text-[10px] text-slate-400">
+                                    📍 <?php echo htmlspecialchars($prod['location_area'] ?? 'Hyderabad'); ?>
+                                </span>
+                            </div>
                         </div>
                         <div class="mt-3 pt-2 border-t border-slate-200">
                             <div class="flex items-center justify-between mb-2">
                                 <span class="text-[11px] text-slate-400">Current</span>
                                 <span class="text-xs font-bold text-slate-900">Rs. <?php echo number_format($p_price, 0); ?></span>
                             </div>
-                            <div class="flex items-center gap-1.5">
+                            <div class="flex items-center gap-2">
                                 <button type="button" onclick="openDetailsModal(<?php echo $prod['id']; ?>)" class="flex-1 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-center rounded-lg text-xs font-semibold transition cursor-pointer">View</button>
                                 <a href="live_auction.php?<?php echo $card_qs; ?>" class="flex-1 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-center rounded-lg text-xs font-bold transition">Bid Now</a>
                             </div>
@@ -1507,6 +1715,69 @@ if ($all_products_res) {
     </div>
 </div>
 
+<!-- Card Discussion Offcanvas Drawer -->
+<div id="cardCommentDrawerBackdrop" class="filter-drawer-backdrop fixed inset-0 bg-slate-950/50 backdrop-blur-xs z-50 flex justify-end">
+    <div id="cardCommentDrawerPanel" class="filter-drawer-panel w-full max-w-md bg-white h-full shadow-2xl flex flex-col justify-between">
+        <!-- Header -->
+        <div class="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/70">
+            <div class="flex items-center gap-2.5">
+                <span class="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold">
+                    <i class="fa-regular fa-comments text-base"></i>
+                </span>
+                <div class="max-w-[260px]">
+                    <span id="cardDrawerLotBadge" class="text-[10px] font-extrabold uppercase tracking-wider text-emerald-700 bg-emerald-100/70 px-2 py-0.5 rounded">#LOT</span>
+                    <h3 id="cardDrawerLotTitle" class="text-sm font-bold text-slate-900 truncate mt-0.5">Lot Discussion</h3>
+                </div>
+            </div>
+            <button type="button" onclick="closeCardCommentsDrawer()" class="w-8 h-8 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition cursor-pointer">
+                <i class="fa-solid fa-xmark text-lg"></i>
+            </button>
+        </div>
+
+        <!-- Comments Feed -->
+        <div class="p-4 sm:p-5 space-y-3 overflow-y-auto flex-1 bg-slate-50/30" id="cardDrawerCommentsList">
+            <div class="text-center py-12 text-slate-400">
+                <i class="fa-solid fa-spinner fa-spin text-xl text-emerald-600 mb-2"></i>
+                <p class="text-xs font-semibold">Loading discussion...</p>
+            </div>
+        </div>
+
+        <!-- Quick Reply Form -->
+        <div class="p-4 border-t border-slate-200 bg-white">
+            <?php if ($is_authenticated): ?>
+                <form id="cardDrawerCommentForm" class="space-y-2">
+                    <input type="hidden" name="action" value="post_comment">
+                    <input type="hidden" name="item_id" id="cardDrawerItemId" value="">
+                    <div class="relative">
+                        <textarea id="cardDrawerCommentInput" 
+                                  name="comment" 
+                                  rows="2" 
+                                  maxlength="500" 
+                                  placeholder="Write a quick comment or question..." 
+                                  required
+                                  class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-800 focus:outline-none focus:border-emerald-600 focus:bg-white focus:ring-2 focus:ring-emerald-100 transition resize-none"></textarea>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span class="text-[10px] text-slate-400">
+                            <span id="cardDrawerCharCount">0</span> / 500
+                        </span>
+                        <button type="submit" 
+                                id="cardDrawerSubmitBtn" 
+                                class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition active:scale-95 cursor-pointer flex items-center gap-1.5">
+                            <i class="fa-solid fa-paper-plane text-xs"></i> Send
+                        </button>
+                    </div>
+                </form>
+            <?php else: ?>
+                <div class="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs text-center text-slate-600">
+                    <p class="mb-2">Sign in to participate in this lot's discussion.</p>
+                    <a href="login.php" class="inline-block px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition">Sign In</a>
+                </div>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
 <div id="auctionDetailsModal" class="auction-modal-backdrop fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
     <div class="bg-white w-full max-w-2xl rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
         <div class="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between">
@@ -1531,24 +1802,38 @@ if ($all_products_res) {
                 <p id="modalDescription" class="text-xs text-slate-600 mt-2 leading-relaxed whitespace-pre-line"></p>
             </div>
 
-            <div class="grid grid-cols-3 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200 text-center text-xs">
-                <div>
-                    <span class="text-slate-400 block font-medium">Current Price</span>
-                    <strong id="modalCurrentPrice" class="text-emerald-700 text-sm">Rs. 0</strong>
+            <!-- Existing Comments Feed in View Card Modal -->
+            <div id="modalCommentsContainer" class="space-y-2 pt-2 border-t border-slate-100">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <i class="fa-regular fa-comments text-emerald-600"></i>
+                        <span>Comments (<span id="modalCommentsCount">0</span>)</span>
+                    </span>
                 </div>
-                <div>
-                    <span class="text-slate-400 block font-medium">Next Minimum</span>
-                    <strong id="modalNextMin" class="text-slate-800 text-sm">Rs. 0</strong>
-                </div>
-                <div>
-                    <span class="text-slate-400 block font-medium">Total Bids</span>
-                    <strong id="modalBidCount" class="text-slate-800 text-sm">0</strong>
+                <div id="modalCommentsList" class="space-y-2 max-h-44 overflow-y-auto pr-1 scrollbar-thin text-xs">
+                    <div class="text-center py-4 text-slate-400 text-xs italic">No comments yet. Be the first to ask the seller a question!</div>
                 </div>
             </div>
 
+            <!-- Comment Input Field matching user screenshot -->
+            <form id="modalCommentForm" onsubmit="handleModalCommentSubmit(event)" class="flex items-center gap-2 pt-1">
+                <input type="hidden" id="modalCommentItemId" value="">
+                <input type="text" 
+                       id="modalCommentInput" 
+                       placeholder="Write a comment..." 
+                       required 
+                       maxlength="500" 
+                       class="flex-1 bg-white border border-slate-300 rounded-lg px-3.5 py-2 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-500 transition">
+                <button type="submit" 
+                        id="modalCommentSubmitBtn" 
+                        class="px-4 py-2 bg-[#60877f] hover:bg-[#4f7069] active:bg-[#3d5953] text-white text-xs font-bold rounded-lg shadow-xs transition active:scale-95 cursor-pointer shrink-0 disabled:opacity-50">
+                    Post Comment
+                </button>
+            </form>
+
             <div class="pt-2 flex items-center gap-2 flex-wrap">
-                <a id="modalBidNowBtn" href="" class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl text-center shadow transition">
-                    <i class="fa-solid fa-gavel mr-1"></i> Go to Live Terminal
+                <a id="modalBidNowBtn" href="" class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl text-center shadow transition flex items-center justify-center gap-1.5">
+                    <i class="fa-solid fa-plane-departure text-xs"></i> Go to Live Terminal
                 </a>
                 <button type="button" id="modalWatchBtn" onclick="" class="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl transition flex items-center gap-1.5 cursor-pointer">
                     <i class="fa-regular fa-heart text-rose-500"></i> Watch
@@ -1616,40 +1901,33 @@ if ($all_products_res) {
         }
     })();
 
-    // Image Gallery Carousel
+    // Image Gallery Carousel & Bayut Bridge
     var currentImgIndex = 0;
     var galleryImages = <?php echo json_encode($gallery_images ?? []); ?>;
     function setMainImage(src, thumb) {
-        var mainImg = document.getElementById('mainImage');
-        if (mainImg) mainImg.src = src;
-        var thumbnails = document.querySelectorAll('.thumbnail-row .thumbnail-img');
-        thumbnails.forEach(function(img) {
-            img.classList.remove('active-thumb', 'border-emerald-600');
-            img.classList.add('border-slate-200');
-        });
-        if (thumb) {
-            thumb.classList.remove('border-slate-200');
-            thumb.classList.add('active-thumb', 'border-emerald-600');
+        if (typeof selectBayutImage === 'function' && window.bayutGalleryData) {
+            for (var i = 0; i < window.bayutGalleryData.length; i++) {
+                if (window.bayutGalleryData[i].url === src) {
+                    selectBayutImage(i);
+                    return;
+                }
+            }
         }
+        var mainImg = document.getElementById('bayutHeroImg') || document.getElementById('mainImage');
+        if (mainImg) mainImg.src = src;
     }
-    <?php if (isset($gallery_images) && count($gallery_images) > 1): ?>
     var prevBtn = document.getElementById('prevBtn');
     var nextBtn = document.getElementById('nextBtn');
     if (prevBtn) {
-        prevBtn.addEventListener('click', function() {
-            currentImgIndex = (currentImgIndex - 1 + galleryImages.length) % galleryImages.length;
-            var thumbs = document.querySelectorAll('.thumbnail-row .thumbnail-img');
-            setMainImage(galleryImages[currentImgIndex], thumbs[currentImgIndex]);
+        prevBtn.addEventListener('click', function(e) {
+            if (typeof stepGalleryHero === 'function') stepGalleryHero(-1, e);
         });
     }
     if (nextBtn) {
-        nextBtn.addEventListener('click', function() {
-            currentImgIndex = (currentImgIndex + 1) % galleryImages.length;
-            var thumbs = document.querySelectorAll('.thumbnail-row .thumbnail-img');
-            setMainImage(galleryImages[currentImgIndex], thumbs[currentImgIndex]);
+        nextBtn.addEventListener('click', function(e) {
+            if (typeof stepGalleryHero === 'function') stepGalleryHero(1, e);
         });
     }
-    <?php endif; ?>
 
     // Countdown Timer with Anti-Sniping Awareness
     var endTimeMs = parseSafeDateMs("<?php echo $effective_item_end ?? ($current_item['end_time'] ?? ''); ?>");
@@ -1713,6 +1991,10 @@ if ($all_products_res) {
                     if (bidCountEl) bidCountEl.textContent = data.bid_count;
                     var watcherEl = document.getElementById('watcherCountDisplay');
                     if (watcherEl) watcherEl.textContent = data.watcher_count;
+                    if (data.total_comments !== undefined) {
+                        var cmtCountEl = document.getElementById('activeLotCommentCount');
+                        if (cmtCountEl) cmtCountEl.textContent = data.total_comments;
+                    }
                     var nextMinEl = document.getElementById('nextMinBidDisplay');
                     if (nextMinEl) nextMinEl.textContent = 'Rs. ' + data.next_min_formatted;
                     var input = document.getElementById('bidAmountInput');
@@ -1749,6 +2031,448 @@ if ($all_products_res) {
             .catch(() => {});
     }
     setInterval(pollAuctionData, 3000);
+
+    // ------------------------------------------------------------------------
+    // Nested Comments & Live Discussion State Engine
+    // ------------------------------------------------------------------------
+    var initialCommentsCount = <?php echo count($current_item_comments); ?>;
+    var initialLastCommentId = <?php 
+        $max_cid = 0;
+        if (!empty($current_item_comments)) {
+            foreach ($current_item_comments as $c) {
+                if ((int)$c['id'] > $max_cid) $max_cid = (int)$c['id'];
+            }
+        }
+        echo $max_cid;
+    ?>;
+
+    function formatClientTimeAgo(dateStr) {
+        if (!dateStr) return 'Just now';
+        var d = new Date(dateStr.replace(/-/g, "/"));
+        var secs = Math.floor((new Date() - d) / 1000);
+        if (isNaN(secs) || secs < 5) return 'Just now';
+        if (secs < 60) return secs + 's ago';
+        if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+        if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+        if (secs < 604800) return Math.floor(secs / 86400) + 'd ago';
+        return d.toLocaleDateString();
+    }
+
+    function renderCommentItemHtml(c) {
+        var avatarHtml = c.avatar 
+            ? '<img src="' + c.avatar + '" class="w-7 h-7 rounded-full object-cover border border-slate-200 shadow-2xs" alt="Avatar">'
+            : '<div class="w-7 h-7 rounded-full ' + (c.is_seller ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700') + ' flex items-center justify-center font-bold text-xs shadow-2xs">' + (c.initial || 'U') + '</div>';
+
+        var roleBadge = '';
+        if (c.is_seller) {
+            roleBadge = '<span class="ml-1 text-[9px] bg-emerald-600 text-white font-extrabold px-1.5 py-0.5 rounded uppercase tracking-wider">Seller</span>';
+        } else if (c.user_role === 'admin') {
+            roleBadge = '<span class="ml-1 text-[9px] bg-purple-600 text-white font-extrabold px-1.5 py-0.5 rounded uppercase tracking-wider">Admin</span>';
+        }
+
+        var bgClass = c.is_seller ? 'bg-emerald-50/70 border border-emerald-200/80' : 'bg-white border border-slate-200/80';
+
+        return '<div class="p-3 rounded-xl ' + bgClass + ' text-xs space-y-1.5 transition hover:border-slate-300 shadow-2xs animate-comment-entry" data-comment-id="' + c.id + '">' +
+            '<div class="flex items-center justify-between">' +
+                '<div class="flex items-center gap-2">' +
+                    avatarHtml +
+                    '<div>' +
+                        '<span class="font-bold text-slate-900">' + c.user_name + '</span>' +
+                        roleBadge +
+                    '</div>' +
+                '</div>' +
+                '<span class="text-[10px] text-slate-400 font-medium">' + (c.time_ago || formatClientTimeAgo(c.created_at)) + '</span>' +
+            '</div>' +
+            '<p class="text-slate-700 text-xs leading-relaxed whitespace-pre-wrap break-words pl-9">' + c.comment + '</p>' +
+        '</div>';
+    }
+
+    window.commentStreamState = {
+        isCollapsed: false,
+        isStreamExpanded: false,
+        lastCommentId: initialLastCommentId,
+        totalCount: initialCommentsCount,
+        isSubmitting: false,
+
+        toggleCollapse: function() {
+            var body = document.getElementById('nestedCommentsBody');
+            var btnText = document.getElementById('toggleCommentsBtnText');
+            var btnIcon = document.getElementById('toggleCommentsBtnIcon');
+            var btn = document.getElementById('toggleCommentsCollapseBtn');
+            if (!body) return;
+
+            this.isCollapsed = !this.isCollapsed;
+            if (this.isCollapsed) {
+                body.style.display = 'none';
+                if (btnText) btnText.textContent = 'Expand (' + this.totalCount + ')';
+                if (btnIcon) btnIcon.className = 'fa-solid fa-chevron-down text-[10px] transition-transform duration-200';
+                if (btn) btn.setAttribute('aria-expanded', 'false');
+            } else {
+                body.style.display = 'block';
+                if (btnText) btnText.textContent = 'Collapse';
+                if (btnIcon) btnIcon.className = 'fa-solid fa-chevron-up text-[10px] transition-transform duration-200';
+                if (btn) btn.setAttribute('aria-expanded', 'true');
+            }
+        },
+
+        toggleExpandStream: function() {
+            var stream = document.getElementById('itemCommentsStream');
+            var textSpan = document.getElementById('expandCommentsStreamText');
+            var icon = document.getElementById('expandCommentsStreamIcon');
+            if (!stream) return;
+
+            this.isStreamExpanded = !this.isStreamExpanded;
+            if (this.isStreamExpanded) {
+                stream.classList.remove('max-h-72', 'sm:max-h-80');
+                stream.classList.add('max-h-[32rem]');
+                if (textSpan) textSpan.textContent = 'Compact discussion view';
+                if (icon) icon.className = 'fa-solid fa-angles-up text-[10px]';
+            } else {
+                stream.classList.remove('max-h-[32rem]');
+                stream.classList.add('max-h-72', 'sm:max-h-80');
+                if (textSpan) textSpan.textContent = 'Show expanded scroll view (' + this.totalCount + ' comments)';
+                if (icon) icon.className = 'fa-solid fa-angles-down text-[10px]';
+            }
+        },
+
+        clearInput: function() {
+            var textarea = document.getElementById('activeLotCommentTextarea');
+            var counter = document.getElementById('activeLotCharCounter');
+            var clearBtn = document.getElementById('activeLotCommentClearBtn');
+            if (textarea) textarea.value = '';
+            if (counter) {
+                counter.textContent = '0';
+                counter.className = 'font-bold text-slate-600';
+            }
+            if (clearBtn) clearBtn.classList.add('hidden');
+        },
+
+        updateCharCount: function(val) {
+            var counter = document.getElementById('activeLotCharCounter');
+            var clearBtn = document.getElementById('activeLotCommentClearBtn');
+            var len = val ? val.length : 0;
+            if (counter) {
+                counter.textContent = len;
+                if (len >= 480) {
+                    counter.className = 'font-bold text-rose-600';
+                } else if (len >= 400) {
+                    counter.className = 'font-bold text-amber-600';
+                } else {
+                    counter.className = 'font-bold text-slate-600';
+                }
+            }
+            if (clearBtn) {
+                if (len > 0) clearBtn.classList.remove('hidden');
+                else clearBtn.classList.add('hidden');
+            }
+        },
+
+        syncCountBadges: function(count) {
+            this.totalCount = count;
+            var activeBadge = document.getElementById('activeLotCommentCount');
+            if (activeBadge) activeBadge.textContent = count;
+            
+            var cardBadge = document.getElementById('cardCommentCount_' + currentLotId);
+            if (cardBadge) cardBadge.textContent = count;
+
+            var btnText = document.getElementById('toggleCommentsBtnText');
+            if (btnText && this.isCollapsed) {
+                btnText.textContent = 'Expand (' + count + ')';
+            }
+
+            var expandBar = document.getElementById('expandStreamControlBar');
+            if (expandBar) {
+                if (count > 3) expandBar.style.display = 'block';
+                else expandBar.style.display = 'none';
+            }
+        }
+    };
+
+    var activeLotCommentForm = document.getElementById('activeLotCommentForm');
+    var activeLotTextarea = document.getElementById('activeLotCommentTextarea');
+    var activeLotSubmitBtn = document.getElementById('activeLotCommentSubmitBtn');
+
+    if (activeLotTextarea) {
+        activeLotTextarea.addEventListener('input', function() {
+            commentStreamState.updateCharCount(this.value);
+        });
+
+        activeLotTextarea.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                if (activeLotCommentForm) {
+                    activeLotCommentForm.requestSubmit();
+                }
+            }
+        });
+    }
+
+    if (activeLotCommentForm) {
+        activeLotCommentForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            var text = activeLotTextarea ? activeLotTextarea.value.trim() : '';
+            if (!text) return;
+
+            commentStreamState.isSubmitting = true;
+            if (activeLotSubmitBtn) {
+                activeLotSubmitBtn.disabled = true;
+                activeLotSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs"></i> <span>Posting...</span>';
+            }
+
+            var fd = new FormData(activeLotCommentForm);
+
+            fetch('ajax_comment.php', { method: 'POST', body: fd })
+                .then(function(r) { return r.json(); })
+                .then(function(res) {
+                    commentStreamState.isSubmitting = false;
+                    if (activeLotSubmitBtn) {
+                        activeLotSubmitBtn.disabled = false;
+                        activeLotSubmitBtn.innerHTML = '<i class="fa-solid fa-paper-plane text-[11px]"></i> <span>Post Comment</span>';
+                    }
+
+                    if (res.status === 'success' && res.comment) {
+                        var stream = document.getElementById('itemCommentsStream');
+                        var emptyPrompt = document.getElementById('noCommentsPrompt');
+                        if (emptyPrompt) emptyPrompt.remove();
+
+                        if (stream) {
+                            var temp = document.createElement('div');
+                            temp.innerHTML = renderCommentItemHtml(res.comment);
+                            var newElem = temp.firstElementChild;
+                            if (newElem) {
+                                stream.appendChild(newElem);
+                                stream.scrollTop = stream.scrollHeight;
+                            }
+                        }
+
+                        if (res.comment.id > commentStreamState.lastCommentId) {
+                            commentStreamState.lastCommentId = res.comment.id;
+                        }
+
+                        if (res.total_comments !== undefined) {
+                            commentStreamState.syncCountBadges(res.total_comments);
+                        }
+
+                        commentStreamState.clearInput();
+                    } else {
+                        if (res.redirect) {
+                            window.location.href = res.redirect;
+                            return;
+                        }
+                        if (typeof showLiveModalPopup === 'function') {
+                            showLiveModalPopup('Comment Error', res.message || 'Failed to post comment', false);
+                        } else {
+                            alert(res.message || 'Failed to post comment');
+                        }
+                    }
+                })
+                .catch(function() {
+                    commentStreamState.isSubmitting = false;
+                    if (activeLotSubmitBtn) {
+                        activeLotSubmitBtn.disabled = false;
+                        activeLotSubmitBtn.innerHTML = '<i class="fa-solid fa-paper-plane text-[11px]"></i> <span>Post Comment</span>';
+                    }
+                });
+        });
+    }
+
+    // Background polling for new comments
+    function pollActiveLotComments() {
+        if (!currentLotId) return;
+        fetch('ajax_comment.php?action=fetch_comments&item_id=' + currentLotId + '&last_id=' + commentStreamState.lastCommentId)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.status === 'success') {
+                    if (data.total_comments !== undefined) {
+                        commentStreamState.syncCountBadges(data.total_comments);
+                    }
+
+                    if (data.comments && data.comments.length > 0) {
+                        var stream = document.getElementById('itemCommentsStream');
+                        var emptyPrompt = document.getElementById('noCommentsPrompt');
+                        if (emptyPrompt) emptyPrompt.remove();
+
+                        data.comments.forEach(function(c) {
+                            if (c.id > commentStreamState.lastCommentId) {
+                                commentStreamState.lastCommentId = c.id;
+                                if (stream) {
+                                    var temp = document.createElement('div');
+                                    temp.innerHTML = renderCommentItemHtml(c);
+                                    var newElem = temp.firstElementChild;
+                                    if (newElem) {
+                                        stream.appendChild(newElem);
+                                        stream.scrollTop = stream.scrollHeight;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            })
+            .catch(function() {});
+    }
+    setInterval(pollActiveLotComments, 6000);
+
+    // ------------------------------------------------------------------------
+    // Card Discussion Offcanvas Drawer Management
+    // ------------------------------------------------------------------------
+    var cardDrawerBackdrop = document.getElementById('cardCommentDrawerBackdrop');
+    var cardDrawerPanel = document.getElementById('cardCommentDrawerPanel');
+    var cardDrawerCommentsList = document.getElementById('cardDrawerCommentsList');
+    var cardDrawerItemIdInput = document.getElementById('cardDrawerItemId');
+    var cardDrawerLotTitle = document.getElementById('cardDrawerLotTitle');
+    var cardDrawerLotBadge = document.getElementById('cardDrawerLotBadge');
+    var cardDrawerForm = document.getElementById('cardDrawerCommentForm');
+    var cardDrawerInput = document.getElementById('cardDrawerCommentInput');
+    var cardDrawerCharCount = document.getElementById('cardDrawerCharCount');
+    var cardDrawerSubmitBtn = document.getElementById('cardDrawerSubmitBtn');
+
+    window.openCardCommentsDrawer = function(itemId, title, e) {
+        if (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        if (!cardDrawerBackdrop || !cardDrawerPanel) return;
+
+        if (cardDrawerLotTitle) cardDrawerLotTitle.textContent = title || ('Lot #' + itemId);
+        if (cardDrawerLotBadge) cardDrawerLotBadge.textContent = '#' + itemId;
+        if (cardDrawerItemIdInput) cardDrawerItemIdInput.value = itemId;
+
+        cardDrawerBackdrop.classList.add('is-open');
+        cardDrawerPanel.classList.add('is-open');
+        document.body.style.overflow = 'hidden';
+
+        if (cardDrawerCommentsList) {
+            cardDrawerCommentsList.innerHTML = '<div class="text-center py-12 text-slate-400">' +
+                '<i class="fa-solid fa-spinner fa-spin text-xl text-emerald-600 mb-2"></i>' +
+                '<p class="text-xs font-semibold">Loading discussion...</p>' +
+            '</div>';
+        }
+
+        fetch('ajax_comment.php?action=get_card_comments&item_id=' + itemId)
+            .then(function(r) { return r.json(); })
+            .then(function(res) {
+                if (res.status === 'success' && cardDrawerCommentsList) {
+                    if (res.title && cardDrawerLotTitle) cardDrawerLotTitle.textContent = res.title;
+                    if (res.comments && res.comments.length > 0) {
+                        var html = '';
+                        res.comments.forEach(function(c) {
+                            var av = c.avatar 
+                                ? '<img src="' + c.avatar + '" class="w-6 h-6 rounded-full object-cover border border-slate-200" alt="Avatar">'
+                                : '<div class="w-6 h-6 rounded-full ' + (c.is_seller ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700') + ' flex items-center justify-center font-bold text-[10px]">' + (c.initial || 'U') + '</div>';
+
+                            html += '<div class="p-2.5 rounded-xl ' + (c.is_seller ? 'bg-emerald-50/70 border border-emerald-200/80' : 'bg-white border border-slate-200/80') + ' text-xs space-y-1 shadow-2xs">' +
+                                '<div class="flex items-center justify-between">' +
+                                    '<div class="flex items-center gap-1.5">' +
+                                        av +
+                                        '<strong class="text-slate-800 text-[11px]">' + c.user_name + '</strong>' +
+                                        (c.is_seller ? '<span class="text-[9px] bg-emerald-600 text-white font-extrabold px-1 rounded uppercase">Seller</span>' : '') +
+                                    '</div>' +
+                                    '<span class="text-[10px] text-slate-400">' + c.time_ago + '</span>' +
+                                '</div>' +
+                                '<p class="text-slate-600 text-xs pl-7 leading-relaxed">' + c.comment + '</p>' +
+                            '</div>';
+                        });
+                        cardDrawerCommentsList.innerHTML = html;
+                    } else {
+                        cardDrawerCommentsList.innerHTML = '<div class="text-center py-10 text-slate-400">' +
+                            '<i class="fa-regular fa-comment-dots text-2xl text-slate-300 mb-1.5"></i>' +
+                            '<p class="text-xs font-semibold text-slate-600">No comments yet on this lot.</p>' +
+                            '<p class="text-[11px] text-slate-400 mt-0.5">Post the first comment below!</p>' +
+                        '</div>';
+                    }
+                }
+            })
+            .catch(function() {
+                if (cardDrawerCommentsList) {
+                    cardDrawerCommentsList.innerHTML = '<div class="text-center py-8 text-rose-500 text-xs">Failed to load comments.</div>';
+                }
+            });
+    };
+
+    window.closeCardCommentsDrawer = function() {
+        if (!cardDrawerBackdrop || !cardDrawerPanel) return;
+        cardDrawerBackdrop.classList.remove('is-open');
+        cardDrawerPanel.classList.remove('is-open');
+        document.body.style.overflow = '';
+    };
+
+    if (cardDrawerBackdrop) {
+        cardDrawerBackdrop.addEventListener('click', function(e) {
+            if (e.target === cardDrawerBackdrop) closeCardCommentsDrawer();
+        });
+    }
+
+    if (cardDrawerInput && cardDrawerCharCount) {
+        cardDrawerInput.addEventListener('input', function() {
+            cardDrawerCharCount.textContent = this.value.length;
+        });
+    }
+
+    if (cardDrawerForm) {
+        cardDrawerForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            var text = cardDrawerInput ? cardDrawerInput.value.trim() : '';
+            var targetItemId = cardDrawerItemIdInput ? cardDrawerItemIdInput.value : 0;
+            if (!text || !targetItemId) return;
+
+            cardDrawerSubmitBtn.disabled = true;
+            cardDrawerSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs"></i>';
+
+            var fd = new FormData(cardDrawerForm);
+
+            fetch('ajax_comment.php', { method: 'POST', body: fd })
+                .then(function(r) { return r.json(); })
+                .then(function(res) {
+                    cardDrawerSubmitBtn.disabled = false;
+                    cardDrawerSubmitBtn.innerHTML = '<i class="fa-solid fa-paper-plane text-xs"></i> Send';
+
+                    if (res.status === 'success' && res.comment) {
+                        var cardBadge = document.getElementById('cardCommentCount_' + targetItemId);
+                        if (cardBadge && res.total_comments !== undefined) {
+                            cardBadge.textContent = res.total_comments;
+                        }
+
+                        if (parseInt(targetItemId) === currentLotId) {
+                            var stream = document.getElementById('itemCommentsStream');
+                            var emptyPrompt = document.getElementById('noCommentsPrompt');
+                            if (emptyPrompt) emptyPrompt.remove();
+                            if (stream) {
+                                var temp = document.createElement('div');
+                                temp.innerHTML = renderCommentItemHtml(res.comment);
+                                stream.appendChild(temp.firstChild);
+                                stream.scrollTop = stream.scrollHeight;
+                            }
+                            var countBadge = document.getElementById('activeLotCommentCount');
+                            if (countBadge && res.total_comments !== undefined) {
+                                countBadge.textContent = res.total_comments;
+                            }
+                            if (res.comment.id > lastCommentId) {
+                                lastCommentId = res.comment.id;
+                            }
+                        }
+
+                        cardDrawerInput.value = '';
+                        if (cardDrawerCharCount) cardDrawerCharCount.textContent = '0';
+                        openCardCommentsDrawer(targetItemId, cardDrawerLotTitle ? cardDrawerLotTitle.textContent : '');
+                    } else {
+                        if (res.redirect) {
+                            window.location.href = res.redirect;
+                            return;
+                        }
+                        if (typeof showLiveModalPopup === 'function') {
+                            showLiveModalPopup('Comment Error', res.message || 'Failed to post comment', false);
+                        } else {
+                            alert(res.message || 'Failed to post comment');
+                        }
+                    }
+                })
+                .catch(function() {
+                    cardDrawerSubmitBtn.disabled = false;
+                    cardDrawerSubmitBtn.innerHTML = '<i class="fa-solid fa-paper-plane text-xs"></i> Send';
+                });
+        });
+    }
 
     // Bid Form Handler
     var bidForm = document.getElementById('bidForm');
@@ -1886,41 +2610,187 @@ if ($all_products_res) {
     }
 
     // Modal Details View
+    // Modal Details View (View Cards)
     function openDetailsModal(itemId) {
+        var itemIdInput = document.getElementById('modalCommentItemId');
+        if (itemIdInput) itemIdInput.value = itemId;
+
+        var commentInput = document.getElementById('modalCommentInput');
+        if (commentInput) commentInput.value = '';
+
+        var commentsList = document.getElementById('modalCommentsList');
+        if (commentsList) {
+            commentsList.innerHTML = '<div class="text-center py-4 text-slate-400 text-xs"><i class="fa-solid fa-spinner fa-spin text-emerald-600 mr-1.5"></i> Loading comments...</div>';
+        }
+
+        var commentsCount = document.getElementById('modalCommentsCount');
+        if (commentsCount) commentsCount.textContent = '0';
+
         fetch('live_auction.php?ajax=1&action=get_modal_details&item_id=' + itemId)
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
-                    document.getElementById('modalLotCode').textContent = '#' + data.auction_code;
-                    document.getElementById('modalImage').src = data.image;
-                    document.getElementById('modalTitle').textContent = data.title;
-                    document.getElementById('modalSeller').textContent = 'Seller: ' + data.seller_name;
-                    document.getElementById('modalDescription').textContent = data.description;
-                    document.getElementById('modalCurrentPrice').textContent = 'Rs. ' + data.current_price;
-                    document.getElementById('modalNextMin').textContent = 'Rs. ' + data.next_min;
-                    document.getElementById('modalBidCount').textContent = data.bid_count;
-                    document.getElementById('modalBidNowBtn').href = 'live_auction.php?id=' + data.id;
+                    var lotCodeEl = document.getElementById('modalLotCode');
+                    if (lotCodeEl) lotCodeEl.textContent = '#' + data.auction_code;
+                    var imgEl = document.getElementById('modalImage');
+                    if (imgEl) imgEl.src = data.image;
+                    var titleEl = document.getElementById('modalTitle');
+                    if (titleEl) titleEl.textContent = data.title;
+                    var sellerEl = document.getElementById('modalSeller');
+                    if (sellerEl) sellerEl.textContent = 'Seller: ' + data.seller_name;
 
+                    var descEl = document.getElementById('modalDescription');
+                    if (descEl) descEl.textContent = data.description;
+                    var bidNowBtn = document.getElementById('modalBidNowBtn');
+                    if (bidNowBtn) bidNowBtn.href = 'live_auction.php?id=' + data.id;
                     var distEl = document.getElementById('modalDistanceTag');
-                    if (data.distance_km !== null) {
-                        distEl.textContent = '📍 ' + data.location_area + ' • ' + data.distance_km + ' km away';
-                        distEl.classList.remove('hidden');
-                    } else {
-                        distEl.classList.add('hidden');
+                    if (distEl) {
+                        if (data.distance_km !== null) {
+                            distEl.textContent = '📍 ' + data.location_area + ' • ' + data.distance_km + ' km away';
+                            distEl.classList.remove('hidden');
+                        } else {
+                            distEl.classList.add('hidden');
+                        }
+                    }
+                    var resBadge = document.getElementById('modalReserveStatus');
+                    if (resBadge) {
+                        resBadge.textContent = data.reserve_met ? 'Reserve Met' : 'Reserve Not Met';
+                        resBadge.className = 'text-xs font-semibold px-2 py-0.5 rounded border ' + 
+                            (data.reserve_met ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200');
                     }
 
-                    var resBadge = document.getElementById('modalReserveStatus');
-                    resBadge.textContent = data.reserve_met ? 'Reserve Met' : 'Reserve Not Met';
-                    resBadge.className = 'text-xs font-semibold px-2 py-0.5 rounded border ' + 
-                        (data.reserve_met ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200');
-
                     var watchBtn = document.getElementById('modalWatchBtn');
-                    watchBtn.onclick = function() { toggleWatchlist(data.id); };
+                    if (watchBtn) {
+                        watchBtn.onclick = function() { toggleWatchlist(data.id); };
+                    }
 
                     document.getElementById('auctionDetailsModal').classList.add('is-open');
                     document.body.style.overflow = 'hidden';
+
+                    loadModalComments(itemId);
                 } else {
                     showLiveModalPopup('Item Details Error', data.error, false);
+                }
+            });
+    }
+
+    function loadModalComments(itemId) {
+        var list = document.getElementById('modalCommentsList');
+        var countBadge = document.getElementById('modalCommentsCount');
+        if (!list) return;
+
+        fetch('ajax_comment.php?action=fetch_comments&item_id=' + itemId)
+            .then(r => r.json())
+            .then(res => {
+                if (res.status === 'success') {
+                    if (countBadge) countBadge.textContent = res.total_comments || 0;
+                    if (res.comments && res.comments.length > 0) {
+                        var html = '';
+                        res.comments.forEach(function(c) {
+                            var av = c.avatar 
+                                ? '<img src="' + c.avatar + '" class="w-6 h-6 rounded-full object-cover border border-slate-200 shadow-2xs" alt="Avatar">'
+                                : '<div class="w-6 h-6 rounded-full ' + (c.is_seller ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700') + ' flex items-center justify-center font-bold text-[10px] shadow-2xs">' + (c.initial || 'U') + '</div>';
+
+                            html += '<div class="p-2.5 rounded-xl ' + (c.is_seller ? 'bg-emerald-50/70 border border-emerald-200/80' : 'bg-slate-50 border border-slate-200/70') + ' text-xs space-y-1 shadow-2xs">' +
+                                '<div class="flex items-center justify-between">' +
+                                    '<div class="flex items-center gap-1.5">' +
+                                        av +
+                                        '<strong class="text-slate-800 text-[11px]">' + c.user_name + '</strong>' +
+                                        (c.is_seller ? '<span class="text-[9px] bg-emerald-600 text-white font-extrabold px-1 rounded uppercase">Seller</span>' : '') +
+                                    '</div>' +
+                                    '<span class="text-[10px] text-slate-400">' + c.time_ago + '</span>' +
+                                '</div>' +
+                                '<p class="text-slate-600 text-xs pl-7 leading-relaxed whitespace-pre-wrap break-words">' + c.comment + '</p>' +
+                            '</div>';
+                        });
+                        list.innerHTML = html;
+                        list.scrollTop = list.scrollHeight;
+                    } else {
+                        list.innerHTML = '<div class="text-center py-4 text-slate-400 text-xs italic">No comments yet. Be the first to ask the seller a question!</div>';
+                    }
+                }
+            })
+            .catch(() => {
+                if (list) list.innerHTML = '<div class="text-center py-3 text-rose-500 text-xs">Failed to load comments.</div>';
+            });
+    }
+
+    function handleModalCommentSubmit(e) {
+        e.preventDefault();
+        var input = document.getElementById('modalCommentInput');
+        var itemIdInput = document.getElementById('modalCommentItemId');
+        var submitBtn = document.getElementById('modalCommentSubmitBtn');
+        var text = input ? input.value.trim() : '';
+        var itemId = itemIdInput ? itemIdInput.value : 0;
+        if (!text || !itemId) return;
+
+        <?php if (!$is_authenticated): ?>
+            window.location.href = 'login.php';
+            return;
+        <?php endif; ?>
+
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-xs"></i>';
+        }
+
+        var fd = new FormData();
+        fd.append('action', 'post_comment');
+        fd.append('item_id', itemId);
+        fd.append('comment', text);
+        fetch('ajax_comment.php', { method: 'POST', body: fd })
+            .then(r => r.json())
+            .then(res => {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Post Comment';
+                }
+
+                if (res.status === 'success' && res.comment) {
+                    input.value = '';
+                    var list = document.getElementById('modalCommentsList');
+                    var countBadge = document.getElementById('modalCommentsCount');
+
+                    if (list && list.querySelector('.italic')) {
+                        list.innerHTML = '';
+                    }
+
+                    if (countBadge && res.total_comments !== undefined) {
+                        countBadge.textContent = res.total_comments;
+                    }
+
+                    if (list) {
+                        var c = res.comment;
+                        var av = c.avatar 
+                            ? '<img src="' + c.avatar + '" class="w-6 h-6 rounded-full object-cover border border-slate-200 shadow-2xs" alt="Avatar">'
+                            : '<div class="w-6 h-6 rounded-full ' + (c.is_seller ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700') + ' flex items-center justify-center font-bold text-[10px] shadow-2xs">' + (c.initial || 'U') + '</div>';
+
+                        var newElem = document.createElement('div');
+                        newElem.className = 'p-2.5 rounded-xl ' + (c.is_seller ? 'bg-emerald-50/70 border border-emerald-200/80' : 'bg-slate-50 border border-slate-200/70') + ' text-xs space-y-1 shadow-2xs animate-comment-entry';
+                        newElem.innerHTML = '<div class="flex items-center justify-between">' +
+                                '<div class="flex items-center gap-1.5">' +
+                                    av +
+                                    '<strong class="text-slate-800 text-[11px]">' + c.user_name + '</strong>' +
+                                    (c.is_seller ? '<span class="text-[9px] bg-emerald-600 text-white font-extrabold px-1 rounded uppercase">Seller</span>' : '') +
+                                '</div>' +
+                                '<span class="text-[10px] text-slate-400">' + c.time_ago + '</span>' +
+                            '</div>' +
+                            '<p class="text-slate-600 text-xs pl-7 leading-relaxed whitespace-pre-wrap break-words">' + c.comment + '</p>';
+                        list.appendChild(newElem);
+                        list.scrollTop = list.scrollHeight;
+                    }
+                } else {
+                    if (res.redirect) {
+                        window.location.href = res.redirect;
+                        return;
+                    }
+                    alert(res.message || 'Failed to post comment');
+                }
+            })
+            .catch(() => {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Post Comment';
                 }
             });
     }

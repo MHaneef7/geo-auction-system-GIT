@@ -1,4 +1,12 @@
 <?php
+/**
+ * Admin Dashboard - Geo Auction System
+ * File: admin/dashboard.php
+ *
+ * Implements real-time platform metrics, dynamic visual analytics powered by Chart.js,
+ * secure prepared statements, and seamless integration with the existing admin layout.
+ */
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -27,22 +35,176 @@ if (!$is_admin_authenticated) {
 
 include_once __DIR__ . '/../includes/database.php';
 include_once __DIR__ . '/../includes/auth.php';
-$total_users_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM users");
-$total_users = ($total_users_res) ? mysqli_fetch_assoc($total_users_res)['c'] : 0;
 
-$active_auctions_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active'");
-$active_auctions = ($active_auctions_res) ? mysqli_fetch_assoc($active_auctions_res)['c'] : 0;
+// Establish PDO connection using existing OOP database architecture
+try {
+    $pdo = Database::getPdo();
+} catch (\Throwable $e) {
+    die("Database Connection Error: " . htmlspecialchars($e->getMessage()));
+}
 
-$total_bids_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM bids");
-$total_bids = ($total_bids_res) ? mysqli_fetch_assoc($total_bids_res)['c'] : 0;
+// -------------------------------------------------------------
+// 1. TOP STAT CARDS (Prepared Statements)
+// -------------------------------------------------------------
+$stmt_users = $pdo->prepare("SELECT COUNT(*) AS c FROM users");
+$stmt_users->execute();
+$total_users = (int)$stmt_users->fetchColumn();
 
-$revenue_res = mysqli_query($conn, "SELECT SUM(current_price) AS s FROM items WHERE status = 'ended'");
-$rev_row = ($revenue_res) ? mysqli_fetch_assoc($revenue_res) : [];
-$total_revenue = 'Rs. ' . number_format((float)($rev_row['s'] ?? 0), 2);
+$stmt_active = $pdo->prepare("SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)");
+$stmt_active->execute();
+$active_auctions = (int)$stmt_active->fetchColumn();
 
-$recent_items_res = mysqli_query($conn, "SELECT i.*, 
-    (SELECT COUNT(*) FROM bids b WHERE b.item_id = i.id) AS bid_count
-    FROM items i ORDER BY i.id DESC LIMIT 5");
+$stmt_bids = $pdo->prepare("SELECT COUNT(*) AS c FROM bids");
+$stmt_bids->execute();
+$total_bids = (int)$stmt_bids->fetchColumn();
+
+$stmt_rev = $pdo->prepare("SELECT SUM(current_price) AS s FROM items WHERE status IN ('ended', 'sold') AND (is_deleted = 0 OR is_deleted IS NULL)");
+$stmt_rev->execute();
+$total_revenue = 'Rs. ' . number_format((float)($stmt_rev->fetchColumn() ?: 0), 2);
+
+$stmt_total_items = $pdo->prepare("SELECT COUNT(*) AS c FROM items WHERE (is_deleted = 0 OR is_deleted IS NULL)");
+$stmt_total_items->execute();
+$total_auctions_count = (int)$stmt_total_items->fetchColumn();
+
+// -------------------------------------------------------------
+// 2. ANALYTICS: 1. AUCTION ACTIVITY OVER TIME
+// -------------------------------------------------------------
+$stmt_auction_act = $pdo->prepare("
+    SELECT 
+        DATE(created_at) as act_date,
+        DATE_FORMAT(created_at, '%d %b %Y') as date_label,
+        COUNT(*) as auction_count
+    FROM items
+    WHERE (is_deleted = 0 OR is_deleted IS NULL)
+    GROUP BY DATE(created_at)
+    ORDER BY act_date ASC
+    LIMIT 30
+");
+$stmt_auction_act->execute();
+$raw_auction_act = $stmt_auction_act->fetchAll();
+
+$auction_chart_labels = [];
+$auction_chart_data   = [];
+
+if (!empty($raw_auction_act)) {
+    foreach ($raw_auction_act as $row) {
+        $auction_chart_labels[] = $row['date_label'];
+        $auction_chart_data[]   = (int)$row['auction_count'];
+    }
+} else {
+    $auction_chart_labels = [date('d M Y')];
+    $auction_chart_data   = [0];
+}
+
+// -------------------------------------------------------------
+// 3. ANALYTICS: 2. BIDS ACTIVITY OVER TIME
+// -------------------------------------------------------------
+$stmt_bids_act = $pdo->prepare("
+    SELECT 
+        DATE(created_at) as act_date,
+        DATE_FORMAT(created_at, '%d %b %Y') as date_label,
+        COUNT(*) as bid_count
+    FROM bids
+    GROUP BY DATE(created_at)
+    ORDER BY act_date ASC
+    LIMIT 30
+");
+$stmt_bids_act->execute();
+$raw_bids_act = $stmt_bids_act->fetchAll();
+
+$bids_chart_labels = [];
+$bids_chart_data   = [];
+
+if (!empty($raw_bids_act)) {
+    foreach ($raw_bids_act as $row) {
+        $bids_chart_labels[] = $row['date_label'];
+        $bids_chart_data[]   = (int)$row['bid_count'];
+    }
+} else {
+    // If no bids recorded yet, align with auction timeline or today's date
+    $bids_chart_labels = !empty($auction_chart_labels) ? $auction_chart_labels : [date('d M Y')];
+    $bids_chart_data   = array_fill(0, count($bids_chart_labels), 0);
+}
+
+// -------------------------------------------------------------
+// 4. ANALYTICS: 3. USER STATISTICS (USERS BY ROLE)
+// -------------------------------------------------------------
+$stmt_user_roles = $pdo->prepare("
+    SELECT 
+        LOWER(role) as role_name,
+        COUNT(*) as user_count
+    FROM users
+    GROUP BY role
+    ORDER BY user_count DESC
+");
+$stmt_user_roles->execute();
+$raw_user_roles = $stmt_user_roles->fetchAll();
+
+$user_role_labels = [];
+$user_role_counts = [];
+$user_role_colors = [];
+
+$role_color_map = [
+    'admin'  => '#dc2626',
+    'seller' => 'rgb(4, 120, 87)',
+    'buyer'  => '#2563eb',
+];
+
+foreach ($raw_user_roles as $row) {
+    $rName = strtolower(trim($row['role_name'] ?? 'buyer'));
+    $user_role_labels[] = ucfirst($rName);
+    $user_role_counts[] = (int)$row['user_count'];
+    $user_role_colors[] = $role_color_map[$rName] ?? '#64748b';
+}
+
+// -------------------------------------------------------------
+// 5. ANALYTICS: 4. AUCTION STATUS STATISTICS (ACTUAL DATABASE VALUES)
+// -------------------------------------------------------------
+$stmt_item_status = $pdo->prepare("
+    SELECT 
+        LOWER(status) as status_name,
+        COUNT(*) as status_count
+    FROM items
+    WHERE (is_deleted = 0 OR is_deleted IS NULL)
+    GROUP BY status
+    ORDER BY status_count DESC
+");
+$stmt_item_status->execute();
+$raw_item_status = $stmt_item_status->fetchAll();
+
+$auction_status_labels = [];
+$auction_status_counts = [];
+$auction_status_colors = [];
+
+$status_color_map = [
+    'active'    => 'rgb(4, 120, 87)',
+    'ended'     => '#64748b',
+    'sold'      => '#2563eb',
+    'pending'   => '#f59e0b',
+    'cancelled' => '#dc2626',
+    'paused'    => '#8b5cf6',
+];
+
+foreach ($raw_item_status as $row) {
+    $sName = strtolower(trim($row['status_name'] ?? 'active'));
+    $auction_status_labels[] = ucfirst($sName);
+    $auction_status_counts[] = (int)$row['status_count'];
+    $auction_status_colors[] = $status_color_map[$sName] ?? '#0d9488';
+}
+
+// -------------------------------------------------------------
+// 6. RECENT AUCTION ITEMS TABLE (Prepared Statement)
+// -------------------------------------------------------------
+$stmt_recent = $pdo->prepare("
+    SELECT i.*, 
+        (SELECT COUNT(*) FROM bids b WHERE b.item_id = i.id) AS bid_count
+    FROM items i 
+    WHERE (i.is_deleted = 0 OR i.is_deleted IS NULL)
+    ORDER BY i.id DESC 
+    LIMIT 5
+");
+$stmt_recent->execute();
+$recent_items = $stmt_recent->fetchAll();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -52,6 +214,8 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
     <title>Admin Dashboard - Geo Auction System</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <!-- Chart.js CDN for dynamic visual analytics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <style>
         :root {
             --primary-green: rgb(4 120 87);
@@ -104,6 +268,21 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
         }
         .card-stat:hover {
             transform: translateY(-2px);
+        }
+        .analytics-card {
+            border: none;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            background: #ffffff;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .analytics-card:hover {
+            box-shadow: 0 8px 15px rgba(0,0,0,0.07);
+        }
+        .chart-container-box {
+            position: relative;
+            height: 255px;
+            width: 100%;
         }
         @media(max-width: 768px) {
             .sidebar {
@@ -159,6 +338,8 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
                 </div>
             </div>
         </div>
+
+        <!-- ── Top Metric Summary Cards ── -->
         <div class="row g-4 mb-4">
             <div class="col-md-3">
                 <div class="card card-stat p-3 bg-white">
@@ -206,6 +387,94 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
             </div>
         </div>
 
+        <!-- ── Analytics & Statistics Section (Chart.js Visualizations) ── -->
+        <div class="d-flex justify-content-between align-items-center mb-3 mt-2 flex-wrap gap-2">
+            <div>
+                <h5 class="fw-bold mb-0 text-dark">
+                    <i class="fas fa-chart-line text-success me-2"></i>Analytics & Statistics
+                </h5>
+                <p class="text-muted small mb-0">Dynamic performance metrics derived from live auction and user activity</p>
+            </div>
+            <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
+                <i class="fas fa-circle-dot me-1"></i> Live Database Data
+            </span>
+        </div>
+
+        <div class="row g-4 mb-4">
+            <!-- 1. Auction Activity Chart -->
+            <div class="col-lg-6 col-12">
+                <div class="card analytics-card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h6 class="fw-bold text-dark mb-0">Auction Activity</h6>
+                            <small class="text-muted">Auctions created over time</small>
+                        </div>
+                        <span class="badge bg-light text-dark border">
+                            Total: <?php echo number_format($total_auctions_count); ?> lots
+                        </span>
+                    </div>
+                    <div class="chart-container-box">
+                        <canvas id="auctionActivityChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. Bids Activity Chart -->
+            <div class="col-lg-6 col-12">
+                <div class="card analytics-card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h6 class="fw-bold text-dark mb-0">Bids Activity</h6>
+                            <small class="text-muted">Number of bids recorded over time</small>
+                        </div>
+                        <span class="badge bg-light text-dark border">
+                            Total: <?php echo number_format($total_bids); ?> bids
+                        </span>
+                    </div>
+                    <div class="chart-container-box">
+                        <canvas id="bidsActivityChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. User Statistics Chart (Roles) -->
+            <div class="col-lg-6 col-12">
+                <div class="card analytics-card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h6 class="fw-bold text-dark mb-0">User Role Distribution</h6>
+                            <small class="text-muted">Breakdown by registered roles (Admin, Seller, Buyer)</small>
+                        </div>
+                        <span class="badge bg-light text-dark border">
+                            Total: <?php echo number_format($total_users); ?> users
+                        </span>
+                    </div>
+                    <div class="chart-container-box d-flex align-items-center justify-content-center">
+                        <canvas id="userRolesChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 4. Auction Status Statistics Chart -->
+            <div class="col-lg-6 col-12">
+                <div class="card analytics-card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h6 class="fw-bold text-dark mb-0">Auction Status Breakdown</h6>
+                            <small class="text-muted">Distribution by actual database statuses</small>
+                        </div>
+                        <span class="badge bg-light text-dark border">
+                            Total: <?php echo number_format($total_auctions_count); ?> lots
+                        </span>
+                    </div>
+                    <div class="chart-container-box d-flex align-items-center justify-content-center">
+                        <canvas id="auctionStatusChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Recent Auction Items & Quick Actions ── -->
         <div class="row g-4">
             <div class="col-md-8">
                 <div class="card border-0 shadow-sm p-4 bg-white" style="border-radius: 12px;">
@@ -222,24 +491,24 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php if ($recent_items_res && mysqli_num_rows($recent_items_res) > 0): ?>
-                                    <?php while ($item = mysqli_fetch_assoc($recent_items_res)): ?>
+                                <?php if (!empty($recent_items)): ?>
+                                    <?php foreach ($recent_items as $item): ?>
                                     <tr>
-                                        <td>#<?php echo $item['id']; ?></td>
+                                        <td>#<?php echo (int)$item['id']; ?></td>
                                         <td>
-                                            <a href="../item.php?id=<?php echo $item['id']; ?>" class="text-dark fw-semibold text-decoration-none">
-                                                <?php echo htmlspecialchars($item['title']); ?>
+                                            <a href="../item.php?id=<?php echo (int)$item['id']; ?>" class="text-dark fw-semibold text-decoration-none">
+                                                <?php echo htmlspecialchars($item['title'] ?? ''); ?>
                                             </a>
                                         </td>
-                                        <td class="fw-bold text-success">Rs. <?php echo number_format($item['current_price'] ?? $item['starting_price'], 2); ?></td>
-                                        <td><?php echo $item['bid_count']; ?></td>
+                                        <td class="fw-bold text-success">Rs. <?php echo number_format((float)($item['current_price'] ?? $item['starting_price']), 2); ?></td>
+                                        <td><?php echo (int)$item['bid_count']; ?></td>
                                         <td>
                                             <span class="badge bg-<?php echo ($item['status'] === 'active') ? 'success' : 'secondary'; ?>">
-                                                <?php echo ucfirst($item['status']); ?>
+                                                <?php echo ucfirst(htmlspecialchars($item['status'] ?? '')); ?>
                                             </span>
                                         </td>
                                     </tr>
-                                    <?php endwhile; ?>
+                                    <?php endforeach; ?>
                                 <?php else: ?>
                                     <tr><td colspan="5" class="text-center text-muted py-3">No recent auction items found.</td></tr>
                                 <?php endif; ?>
@@ -261,8 +530,217 @@ $recent_items_res = mysqli_query($conn, "SELECT i.*,
             </div>
         </div>
     </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- ── Dynamic Chart.js Rendering Engine ── -->
     <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        if (typeof Chart === 'undefined') {
+            console.error('Chart.js library failed to load.');
+            return;
+        }
+
+        const primaryGreen = 'rgb(4, 120, 87)';
+        const primaryGreenLight = 'rgba(4, 120, 87, 0.15)';
+        const axisColor = '#64748b';
+        const gridColor = 'rgba(0, 0, 0, 0.05)';
+
+        // 1. Auction Activity Chart (Over Time)
+        const ctxAuction = document.getElementById('auctionActivityChart');
+        if (ctxAuction) {
+            new Chart(ctxAuction, {
+                type: 'line',
+                data: {
+                    labels: <?php echo json_encode($auction_chart_labels, JSON_UNESCAPED_UNICODE); ?>,
+                    datasets: [{
+                        label: 'Auctions Created',
+                        data: <?php echo json_encode($auction_chart_data); ?>,
+                        borderColor: primaryGreen,
+                        backgroundColor: primaryGreenLight,
+                        borderWidth: 2.5,
+                        pointBackgroundColor: primaryGreen,
+                        pointBorderColor: '#ffffff',
+                        pointBorderWidth: 2,
+                        pointRadius: 4,
+                        pointHoverRadius: 6,
+                        tension: 0.35,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return ' ' + context.parsed.y + ' auction(s) created';
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: axisColor, font: { size: 11, weight: 500 } }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            grid: { color: gridColor },
+                            ticks: {
+                                color: axisColor,
+                                precision: 0,
+                                stepSize: 1
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // 2. Bids Activity Chart (Over Time)
+        const ctxBids = document.getElementById('bidsActivityChart');
+        if (ctxBids) {
+            new Chart(ctxBids, {
+                type: 'bar',
+                data: {
+                    labels: <?php echo json_encode($bids_chart_labels, JSON_UNESCAPED_UNICODE); ?>,
+                    datasets: [{
+                        label: 'Bids Placed',
+                        data: <?php echo json_encode($bids_chart_data); ?>,
+                        backgroundColor: 'rgba(245, 158, 11, 0.85)',
+                        borderColor: 'rgb(217, 119, 6)',
+                        borderWidth: 1.5,
+                        borderRadius: 6,
+                        barPercentage: 0.65,
+                        categoryPercentage: 0.7
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return ' ' + context.parsed.y + ' bid(s) recorded';
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { display: false },
+                            ticks: { color: axisColor, font: { size: 11, weight: 500 } }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            grid: { color: gridColor },
+                            ticks: {
+                                color: axisColor,
+                                precision: 0,
+                                stepSize: 1
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // 3. User Roles Chart
+        const ctxRoles = document.getElementById('userRolesChart');
+        if (ctxRoles) {
+            new Chart(ctxRoles, {
+                type: 'doughnut',
+                data: {
+                    labels: <?php echo json_encode($user_role_labels, JSON_UNESCAPED_UNICODE); ?>,
+                    datasets: [{
+                        data: <?php echo json_encode($user_role_counts); ?>,
+                        backgroundColor: <?php echo json_encode($user_role_colors); ?>,
+                        borderWidth: 2,
+                        borderColor: '#ffffff',
+                        hoverOffset: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '66%',
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                color: axisColor,
+                                padding: 14,
+                                font: { size: 12, weight: 600 },
+                                usePointStyle: true,
+                                pointStyle: 'circle'
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                    const val = context.parsed;
+                                    const pct = total > 0 ? ((val / total) * 100).toFixed(1) : 0;
+                                    return ` ${context.label}: ${val} (${pct}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // 4. Auction Status Statistics Chart
+        const ctxStatus = document.getElementById('auctionStatusChart');
+        if (ctxStatus) {
+            new Chart(ctxStatus, {
+                type: 'doughnut',
+                data: {
+                    labels: <?php echo json_encode($auction_status_labels, JSON_UNESCAPED_UNICODE); ?>,
+                    datasets: [{
+                        data: <?php echo json_encode($auction_status_counts); ?>,
+                        backgroundColor: <?php echo json_encode($auction_status_colors); ?>,
+                        borderWidth: 2,
+                        borderColor: '#ffffff',
+                        hoverOffset: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '66%',
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                color: axisColor,
+                                padding: 14,
+                                font: { size: 12, weight: 600 },
+                                usePointStyle: true,
+                                pointStyle: 'circle'
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                    const val = context.parsed;
+                                    const pct = total > 0 ? ((val / total) * 100).toFixed(1) : 0;
+                                    return ` ${context.label}: ${val} lots (${pct}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+
     window.addEventListener('pageshow', function (event) {
         if (event.persisted || (window.performance && window.performance.navigation && window.performance.navigation.type === 2)) {
             window.location.reload();

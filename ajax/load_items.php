@@ -15,9 +15,14 @@ $category_id = isset($_GET['category_id']) ? (int)$_GET['category_id'] : 0;
 $sort        = isset($_GET['sort']) ? mysqli_real_escape_string($conn, $_GET['sort']) : 'newest';
 
 // Build WHERE
-$where = "WHERE i.status = 'active'";
-if ($category_id) {
-    $where .= " AND i.category_id = $category_id";
+$where = "WHERE i.status = 'active' AND (i.is_deleted = 0 OR i.is_deleted IS NULL)";
+$params = [];
+$types = '';
+
+if ($category_id > 0) {
+    $where .= " AND i.category_id = ?";
+    $params[] = $category_id;
+    $types .= 'i';
 }
 
 // Build ORDER
@@ -30,15 +35,25 @@ $order_map = [
 ];
 $order = isset($order_map[$sort]) ? $order_map[$sort] : 'i.created_at DESC';
 
-$items_res = mysqli_query($conn, "
+$sql = "
     SELECT i.*, c.name AS category_name,
            (SELECT COUNT(*) FROM bids b WHERE b.item_id = i.id) AS bid_count
     FROM items i
     LEFT JOIN categories c ON c.id = i.category_id
     $where
     ORDER BY $order
-    LIMIT $limit OFFSET $offset
-");
+    LIMIT ? OFFSET ?
+";
+
+$item_params = $params;
+$item_types = $types . 'ii';
+$item_params[] = $limit;
+$item_params[] = $offset;
+
+$stmt = mysqli_prepare($conn, $sql);
+mysqli_stmt_bind_param($stmt, $item_types, ...$item_params);
+mysqli_stmt_execute($stmt);
+$items_res = mysqli_stmt_get_result($stmt);
 
 $items = [];
 if ($items_res) {
@@ -60,19 +75,30 @@ if ($items_res) {
         $items[] = [
             'id'            => $row['id'],
             'title'         => $row['title'],
-            'current_price' => '$' . number_format((float)($row['current_price'] ?? $row['starting_price']), 2),
+            'current_price' => 'Rs. ' . number_format((float)($row['current_price'] ?? $row['starting_price']), 2),
             'bid_count'     => (int)$row['bid_count'],
             'time_remaining'=> $time_remaining,
             'category'      => $row['category_name'] ?? '',
             'image'         => $row['image'] ?? '',
-            'url'           => '../item.php?id=' . $row['id'],
+            'url'           => '../live_auction.php?id=' . $row['id'],
         ];
     }
 }
+if ($stmt) mysqli_stmt_close($stmt);
 
 // Total count for has_more check
-$count_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items i $where");
-$total = mysqli_fetch_assoc($count_res)['c'] ?? 0;
+$count_sql = "SELECT COUNT(*) AS c FROM items i $where";
+if (!empty($params)) {
+    $c_stmt = mysqli_prepare($conn, $count_sql);
+    mysqli_stmt_bind_param($c_stmt, $types, ...$params);
+    mysqli_stmt_execute($c_stmt);
+    $count_res = mysqli_stmt_get_result($c_stmt);
+    $total = mysqli_fetch_assoc($count_res)['c'] ?? 0;
+    mysqli_stmt_close($c_stmt);
+} else {
+    $count_res = mysqli_query($conn, $count_sql);
+    $total = mysqli_fetch_assoc($count_res)['c'] ?? 0;
+}
 
 echo json_encode([
     'success'  => true,

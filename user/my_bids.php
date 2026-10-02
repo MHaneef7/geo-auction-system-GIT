@@ -35,11 +35,17 @@ $sql = "
         i.current_price
     FROM bids AS b
     INNER JOIN items AS i ON b.item_id = i.id
-    WHERE b.user_id = $user_id
+    WHERE b.user_id = ?
     ORDER BY b.created_at DESC
 ";
 
-$bids = mysqli_query($conn, $sql);
+$stmt = mysqli_prepare($conn, $sql);
+if (!$stmt) {
+    die("Query Prepare Error: " . mysqli_error($conn));
+}
+mysqli_stmt_bind_param($stmt, "i", $user_id);
+mysqli_stmt_execute($stmt);
+$bids = mysqli_stmt_get_result($stmt);
 
 if (!$bids) {
     die("Query Error: " . mysqli_error($conn));
@@ -225,15 +231,15 @@ body {
                         ?>
                         <tr>
                             <td class="td-item-title">
-                                <a href="../item.php?id=<?php echo (int)$row['item_id']; ?>">
+                                <a href="../live_auction.php?id=<?php echo (int)$row['item_id']; ?>" class="font-bold hover:underline">
                                     <?php echo htmlspecialchars($row['title'] ?? 'Item #' . $row['item_id']); ?>
                                 </a>
                             </td>
                             <td class="td-amount">
-                                $<?php echo number_format((float)$row['bid_amount'], 2); ?>
+                                Rs. <?php echo number_format((float)$row['bid_amount'], 2); ?>
                             </td>
                             <td>
-                                $<?php echo number_format((float)$row['current_price'], 2); ?>
+                                Rs. <?php echo number_format((float)$row['current_price'], 2); ?>
                             </td>
                             <td>
                                 <?php if ($is_winning): ?>

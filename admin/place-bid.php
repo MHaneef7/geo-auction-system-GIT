@@ -44,8 +44,12 @@ try {
     $currentPrice = floatval($item['current_price'] > 0 ? $item['current_price'] : $item['starting_price']);
     $minIncrement = floatval($item['min_increment'] > 0 ? $item['min_increment'] : 1.00);
 
-    $bidCheck = mysqli_query($conn, "SELECT COUNT(*) AS c FROM `bids` WHERE `item_id` = $item_id");
-    $hasBids = (mysqli_fetch_assoc($bidCheck)['c'] ?? 0) > 0;
+    $bStmt = mysqli_prepare($conn, "SELECT COUNT(*) AS c FROM `bids` WHERE `item_id` = ?");
+    mysqli_stmt_bind_param($bStmt, "i", $item_id);
+    mysqli_stmt_execute($bStmt);
+    $bRes = mysqli_stmt_get_result($bStmt);
+    $hasBids = (mysqli_fetch_assoc($bRes)['c'] ?? 0) > 0;
+    mysqli_stmt_close($bStmt);
     $nextMinBid = $hasBids ? ($currentPrice + $minIncrement) : $currentPrice;
 
     if ($bid_amount < $nextMinBid) {
@@ -66,7 +70,10 @@ try {
     $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
 
     // 3. Reset old winning bids
-    mysqli_query($conn, "UPDATE `bids` SET `is_winning` = 0 WHERE `item_id` = $item_id");
+    $resetStmt = mysqli_prepare($conn, "UPDATE `bids` SET `is_winning` = 0 WHERE `item_id` = ?");
+    mysqli_stmt_bind_param($resetStmt, "i", $item_id);
+    mysqli_stmt_execute($resetStmt);
+    mysqli_stmt_close($resetStmt);
 
     // 4. Insert New Bid
     $ins = mysqli_prepare($conn, "INSERT INTO `bids` (`item_id`, `user_id`, `bidder_name`, `bidder_email`, `bid_amount`, `is_winning`, `ip_address`, `user_agent`, `created_at`, `status`) VALUES (?, ?, ?, ?, ?, 1, ?, ?, NOW(), 'active')");

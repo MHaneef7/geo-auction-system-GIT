@@ -43,10 +43,22 @@ if ($type === 'item' || $type === 'items') {
 
 // 3. Fallback: If id is given, check whether it matches a user or item
 if ($id > 0) {
-    $chk_u = mysqli_query($conn, "SELECT id FROM users WHERE id = " . $id . " LIMIT 1");
-    if ($chk_u && mysqli_num_rows($chk_u) > 0 && !isset($_GET['item_id'])) {
-        $chk_i = mysqli_query($conn, "SELECT id FROM items WHERE id = " . $id . " LIMIT 1");
-        if ($chk_i && mysqli_num_rows($chk_i) > 0) {
+    $u_stmt = mysqli_prepare($conn, "SELECT id FROM users WHERE id = ? LIMIT 1");
+    mysqli_stmt_bind_param($u_stmt, "i", $id);
+    mysqli_stmt_execute($u_stmt);
+    $chk_u = mysqli_stmt_get_result($u_stmt);
+    $has_user = ($chk_u && mysqli_num_rows($chk_u) > 0);
+    mysqli_stmt_close($u_stmt);
+
+    if ($has_user && !isset($_GET['item_id'])) {
+        $i_stmt = mysqli_prepare($conn, "SELECT id FROM items WHERE id = ? LIMIT 1");
+        mysqli_stmt_bind_param($i_stmt, "i", $id);
+        mysqli_stmt_execute($i_stmt);
+        $chk_i = mysqli_stmt_get_result($i_stmt);
+        $has_item = ($chk_i && mysqli_num_rows($chk_i) > 0);
+        mysqli_stmt_close($i_stmt);
+
+        if ($has_item) {
             header("Location: items.php?search=" . $id);
         } else {
             header("Location: users.php?edit=" . $id);

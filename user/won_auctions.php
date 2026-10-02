@@ -285,6 +285,8 @@ include_once __DIR__ . '/../includes/header.php';
 <!-- Tailwind CSS & FontAwesome for Modern E-Commerce UI -->
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<!-- SweetAlert2 Modern Modals -->
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
@@ -530,33 +532,28 @@ include_once __DIR__ . '/../includes/header.php';
                             <td class="p-4 pr-6 text-right">
                                 <div class="inline-flex items-center gap-2">
                                     <?php if (!$is_paid): ?>
-                                        <!-- Pay Now Button -->
-                                        <form method="POST" action="" onsubmit="return confirm('Settle Rs. <?php echo number_format((float)$order['total_amount'], 2); ?> directly from your wallet balance?');">
-                                            <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
-                                            <input type="hidden" name="action" value="pay_via_wallet">
-                                            <input type="hidden" name="item_id" value="<?php echo (int)$order['item_id']; ?>">
-                                            <input type="hidden" name="order_id" value="<?php echo (int)($order['order_id'] ?? 0); ?>">
-                                            <input type="hidden" name="seller_id" value="<?php echo (int)$order['seller_id']; ?>">
-                                            <input type="hidden" name="amount" value="<?php echo (float)$order['total_amount']; ?>">
-                                            <button type="submit" class="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold shadow-sm transition">
-                                                <i class="fa-solid fa-credit-card mr-1"></i> Pay Now
-                                            </button>
-                                        </form>
+                                        <!-- Complete Order / Checkout Button -->
+                                        <a href="../checkout.php?item_id=<?php echo (int)$order['item_id']; ?>" 
+                                           class="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold shadow-sm transition inline-flex items-center gap-1.5">
+                                            <i class="fa-solid fa-credit-card"></i> Pay &amp; Checkout
+                                        </a>
                                     <?php else: ?>
                                         <!-- Invoice Button -->
-                                        <a href="pay.php?item_id=<?php echo (int)$order['item_id']; ?>" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition">
-                                            <i class="fa-solid fa-receipt mr-1"></i> Invoice
+                                        <a href="../checkout.php?item_id=<?php echo (int)$order['item_id']; ?>" 
+                                           class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition inline-flex items-center gap-1.5">
+                                            <i class="fa-solid fa-receipt"></i> Invoice
                                         </a>
                                     <?php endif; ?>
 
                                     <?php if ($ship_status === 'SHIPPED'): ?>
-                                        <!-- Confirm Delivery -->
-                                        <form method="POST" action="" onsubmit="return confirm('Confirm that you have received this parcel in good condition?');">
+                                        <!-- Confirm Delivery via SweetAlert2 -->
+                                        <form method="POST" action="" id="deliveryForm_<?php echo (int)$order['order_id']; ?>">
                                             <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                             <input type="hidden" name="action" value="confirm_delivery">
                                             <input type="hidden" name="order_id" value="<?php echo (int)$order['order_id']; ?>">
-                                            <button type="submit" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-sm transition">
-                                                <i class="fa-solid fa-check-double mr-1"></i> Received
+                                            <button type="button" onclick="confirmDelivery(<?php echo (int)$order['order_id']; ?>)" 
+                                                    class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-sm transition inline-flex items-center gap-1.5">
+                                                <i class="fa-solid fa-check-double"></i> Received
                                             </button>
                                         </form>
                                     <?php endif; ?>
@@ -655,6 +652,30 @@ function openContactSellerModal(name, email, phone) {
 
 function closeContactSellerModal() {
     document.getElementById('contactSellerModal').classList.add('hidden');
+}
+
+function confirmDelivery(orderId) {
+    if (typeof Swal === 'undefined') {
+        if (confirm('Confirm that you have received this parcel in good condition?')) {
+            document.getElementById('deliveryForm_' + orderId).submit();
+        }
+        return;
+    }
+
+    Swal.fire({
+        title: 'Confirm Delivery',
+        text: 'Are you sure you have received this auction lot in good condition? This will mark the order as Completed.',
+        icon: 'question',
+        showCancelButton: true,
+        confirmButtonColor: '#4f46e5',
+        cancelButtonColor: '#64748b',
+        confirmButtonText: '<i class="fa-solid fa-check"></i> Yes, Parcel Received',
+        cancelButtonText: 'Cancel'
+    }).then((result) => {
+        if (result.isConfirmed) {
+            document.getElementById('deliveryForm_' + orderId).submit();
+        }
+    });
 }
 </script>
 

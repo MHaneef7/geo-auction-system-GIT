@@ -9,7 +9,7 @@ $success = '';
 $token = $_GET['token'] ?? '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $token = mysqli_real_escape_string($conn, $_POST['token'] ?? '');
+    $token = trim($_POST['token'] ?? '');
     $password = $_POST['password'] ?? '';
     $confirm_password = $_POST['confirm_password'] ?? '';
 
@@ -19,22 +19,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif (strlen($password) < 6) {
             $error = "Password must be at least 6 characters long.";
         } else {
-            $sql = "SELECT id FROM users WHERE reset_token = '$token' AND reset_token_expires_at > NOW() LIMIT 1";
-            $res = mysqli_query($conn, $sql);
+            $stmt = mysqli_prepare($conn, "SELECT id FROM users WHERE reset_token = ? AND reset_token_expires_at > NOW() LIMIT 1");
+            mysqli_stmt_bind_param($stmt, "s", $token);
+            mysqli_stmt_execute($stmt);
+            $res = mysqli_stmt_get_result($stmt);
 
             if ($res && mysqli_num_rows($res) > 0) {
                 $user = mysqli_fetch_assoc($res);
                 $user_id = (int)$user['id'];
                 $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-                $hashed_escaped  = mysqli_real_escape_string($conn, $hashed_password);
 
-                $update_sql = "UPDATE users SET password = '$hashed_escaped', reset_token = NULL, reset_token_expires_at = NULL WHERE id = $user_id";
-                mysqli_query($conn, $update_sql);
+                $update_stmt = mysqli_prepare($conn, "UPDATE users SET password = ?, reset_token = NULL, reset_token_expires_at = NULL WHERE id = ?");
+                mysqli_stmt_bind_param($update_stmt, "si", $hashed_password, $user_id);
+                mysqli_stmt_execute($update_stmt);
+                mysqli_stmt_close($update_stmt);
 
                 $success = "Password successfully reset! You can now <a href='login.php'>login here</a>.";
             } else {
                 $error = "Invalid or expired reset token.";
             }
+            mysqli_stmt_close($stmt);
         }
     } else {
         $error = "Please fill in all fields.";

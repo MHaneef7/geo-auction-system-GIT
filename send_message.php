@@ -1,9 +1,9 @@
 <?php
 /**
- * Send Message Endpoint
+ * AJAX Message Dispatcher Endpoint
  * File: send_message.php
- * 
- * Tech Stack: PHP 8+, OOP PHP, PDO, JSON API
+ * Geo Auction System
+ *
  * Handles sending messages, database transaction, and notification triggering.
  */
 
@@ -30,7 +30,7 @@ if (!is_logged_in()) {
     exit();
 }
 
-$senderId = (int)($_SESSION['user_id'] ?? 0);
+$senderId = (int)($_SESSION['user_id'] ?? ($_SESSION['admin_id'] ?? 0));
 if ($senderId <= 0) {
     http_response_code(401);
     echo json_encode(['success' => false, 'message' => 'Invalid user session.']);
@@ -46,13 +46,11 @@ $messageBody = trim($_POST['message_body'] ?? ($_POST['message'] ?? ($jsonData['
 $itemId      = isset($_POST['item_id']) ? (int)$_POST['item_id'] : (isset($jsonData['item_id']) ? (int)$jsonData['item_id'] : null);
 $subject     = trim($_POST['subject'] ?? ($jsonData['subject'] ?? ''));
 
-// Basic input validation
 if ($receiverId <= 0) {
     http_response_code(400);
     echo json_encode(['success' => false, 'message' => 'A valid recipient user ID is required.']);
     exit();
 }
-
 if ($senderId === $receiverId) {
     http_response_code(400);
     echo json_encode(['success' => false, 'message' => 'You cannot send a message to yourself.']);

@@ -107,7 +107,6 @@ class MessageService
             $sql = "INSERT INTO messages (
                         sender_id,
                         receiver_id,
-                        message_body,
                         message,
                         item_id,
                         subject,
@@ -118,7 +117,6 @@ class MessageService
                     ) VALUES (
                         :sender_id,
                         :receiver_id,
-                        :message_body,
                         :message,
                         :item_id,
                         :subject,
@@ -132,7 +130,6 @@ class MessageService
             $stmt->execute([
                 ':sender_id'    => $senderId,
                 ':receiver_id'  => $receiverId,
-                ':message_body' => $cleanBody,
                 ':message'      => $cleanBody,
                 ':item_id'      => $itemId,
                 ':subject'      => $cleanSubject,
@@ -182,7 +179,6 @@ class MessageService
                     m.id,
                     m.sender_id,
                     m.receiver_id,
-                    m.message_body,
                     m.message,
                     m.item_id,
                     m.subject,
@@ -212,7 +208,7 @@ class MessageService
 
         foreach ($rows as $row) {
             $isOutgoing = ((int)$row['sender_id'] === $currentUser);
-            $body = !empty($row['message_body']) ? $row['message_body'] : ($row['message'] ?? '');
+            $body = $row['message'] ?? '';
             $ts = strtotime($row['created_at']);
 
             $history[] = [
@@ -309,11 +305,11 @@ class MessageService
                 continue;
             }
 
-            $msgStmt = $this->pdo->prepare("SELECT message_body, message, created_at, sender_id, item_id FROM messages WHERE id = :mid LIMIT 1");
+            $msgStmt = $this->pdo->prepare("SELECT message, created_at, sender_id, item_id FROM messages WHERE id = :mid LIMIT 1");
             $msgStmt->execute([':mid' => $p['latest_message_id']]);
             $latestMsg = $msgStmt->fetch();
 
-            $body = $latestMsg ? (!empty($latestMsg['message_body']) ? $latestMsg['message_body'] : ($latestMsg['message'] ?? '')) : '';
+            $body = $latestMsg ? ($latestMsg['message'] ?? '') : '';
             $preview = mb_substr($body, 0, 60) . (mb_strlen($body) > 60 ? '...' : '');
 
             $createdTs = strtotime($p['last_activity']);

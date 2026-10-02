@@ -399,6 +399,69 @@ CREATE TABLE IF NOT EXISTS activity_logs (
 ) ENGINE=InnoDB;
 
 -- ============================================================
+-- 16. Orders Table (Checkout & Purchases)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS orders (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    order_number VARCHAR(50) NOT NULL UNIQUE,
+    auction_id INT NOT NULL,
+    buyer_id INT NOT NULL,
+    seller_id INT NOT NULL,
+    hammer_price DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    platform_fee DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    shipping_fee DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    total_amount DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    payment_status ENUM('PAYMENT_PENDING', 'PAID', 'REFUNDED', 'AUTO_SETTLED') NOT NULL DEFAULT 'PAYMENT_PENDING',
+    shipping_status ENUM('PROCESSING', 'SHIPPED', 'DELIVERED', 'COMPLETED', 'DISPUTED') NOT NULL DEFAULT 'PROCESSING',
+    tracking_company VARCHAR(100) NULL,
+    tracking_number VARCHAR(100) NULL,
+    tracking_url VARCHAR(255) NULL,
+    shipping_address TEXT NULL,
+    delivery_confirmed_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_orders_auction (auction_id),
+    INDEX idx_orders_buyer (buyer_id),
+    INDEX idx_orders_seller (seller_id),
+    INDEX idx_orders_shipping (shipping_status)
+) ENGINE=InnoDB;
+
+-- ============================================================
+-- 17. Auto Bids Table (Proxy Bidding Engine)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS auto_bids (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    item_id INT NOT NULL,
+    user_id INT NOT NULL,
+    max_bid_amount DECIMAL(12, 2) NOT NULL,
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_item_user (item_id, user_id),
+    INDEX idx_item_active (item_id, is_active)
+) ENGINE=InnoDB;
+
+-- ============================================================
+-- 18. Transactions Table (Platform Wallet & Escrow Ledger)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS transactions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id INT NOT NULL,
+    type VARCHAR(50) NOT NULL, -- deposit, withdrawal, bid_payment, bid_refund, sale_payout
+    amount DECIMAL(12, 2) NOT NULL,
+    balance_before DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    balance_after DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    item_id INT NULL,
+    reference_id VARCHAR(100) NULL,
+    description TEXT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'completed',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_transactions_user (user_id),
+    INDEX idx_transactions_type (type),
+    INDEX idx_transactions_created (created_at DESC)
+) ENGINE=InnoDB;
+
+-- ============================================================
 -- Insert Default Data
 -- ============================================================
 
