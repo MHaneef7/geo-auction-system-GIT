@@ -11,29 +11,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $email = trim($_POST['email'] ?? '');
 
     if (!empty($email)) {
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            $error = "Please enter a valid email address.";
-        } else {
-            $stmt = mysqli_prepare($conn, "SELECT id FROM users WHERE email = ? LIMIT 1");
-            mysqli_stmt_bind_param($stmt, "s", $email);
-            mysqli_stmt_execute($stmt);
-            $res = mysqli_stmt_get_result($stmt);
+        try {
+            $stmt = $pdo->prepare("SELECT id FROM users WHERE email = :email LIMIT 1");
+            $stmt->execute([':email' => $email]);
+            $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-            if ($res && mysqli_num_rows($res) > 0) {
-                $user = mysqli_fetch_assoc($res);
+            if ($user) {
                 $token = bin2hex(random_bytes(32));
                 $expires = date("Y-m-d H:i:s", strtotime("+1 hour"));
 
-                $update_stmt = mysqli_prepare($conn, "UPDATE users SET reset_token = ?, reset_token_expires_at = ? WHERE email = ?");
-                mysqli_stmt_bind_param($update_stmt, "sss", $token, $expires, $email);
-                mysqli_stmt_execute($update_stmt);
-                mysqli_stmt_close($update_stmt);
+                try {
+                    $upStmt = $pdo->prepare("UPDATE users SET reset_token = :token, reset_token_expires_at = :exp WHERE email = :email");
+                    $upStmt->execute([':token' => $token, ':exp' => $expires, ':email' => $email]);
+                } catch (\Throwable $te) {
+                    try {
+                        $pdo->exec("ALTER TABLE users ADD COLUMN reset_token VARCHAR(255) NULL, ADD COLUMN reset_token_expires_at DATETIME NULL");
+                        $upStmt = $pdo->prepare("UPDATE users SET reset_token = :token, reset_token_expires_at = :exp WHERE email = :email");
+                        $upStmt->execute([':token' => $token, ':exp' => $expires, ':email' => $email]);
+                    } catch (\Throwable $te2) {}
+                }
 
-                $message = "If that email exists, a reset link has been generated. <br><br><strong>Testing Reset Link:</strong> <a href='reset_password.php?token=" . urlencode($token) . "'>Reset Password Here</a>";
+                $message = "If that email exists, a reset link has been generated. <br><br><strong>Reset Link:</strong> <a href='reset_password.php?token=" . urlencode($token) . "'>Reset Password Here</a>";
             } else {
                 $message = "If that email exists, a reset link has been generated.";
             }
-            mysqli_stmt_close($stmt);
+        } catch (\Throwable $e) {
+            $error = "A system error occurred. Please try again later.";
         }
     } else {
         $error = "Please enter your email address.";

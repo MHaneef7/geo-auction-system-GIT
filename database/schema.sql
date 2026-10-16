@@ -284,7 +284,7 @@ CREATE TABLE IF NOT EXISTS payments (
     amount DECIMAL(12, 2) NOT NULL,
     fee DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
     total_amount DECIMAL(12, 2) NOT NULL,
-    currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+    currency VARCHAR(3) NOT NULL DEFAULT 'PKR',
     
     -- Payment Method
     payment_method VARCHAR(50) NULL, -- credit_card, paypal, stripe, bank_transfer
@@ -399,7 +399,7 @@ CREATE TABLE IF NOT EXISTS activity_logs (
 ) ENGINE=InnoDB;
 
 -- ============================================================
--- 16. Orders Table (Checkout & Purchases)
+-- 16. Orders Table (Won Lot Orders & Fulfillment Tracking)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS orders (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -420,46 +420,87 @@ CREATE TABLE IF NOT EXISTS orders (
     delivery_confirmed_at TIMESTAMP NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_orders_auction (auction_id),
     INDEX idx_orders_buyer (buyer_id),
     INDEX idx_orders_seller (seller_id),
-    INDEX idx_orders_shipping (shipping_status)
+    INDEX idx_orders_auction (auction_id),
+    INDEX idx_orders_shipping_status (shipping_status)
 ) ENGINE=InnoDB;
 
 -- ============================================================
--- 17. Auto Bids Table (Proxy Bidding Engine)
+-- 17. Wallets & Security Lock Subsystem
 -- ============================================================
-CREATE TABLE IF NOT EXISTS auto_bids (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    item_id INT NOT NULL,
+CREATE TABLE IF NOT EXISTS wallets (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
-    max_bid_amount DECIMAL(12, 2) NOT NULL,
-    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    currency VARCHAR(3) NOT NULL DEFAULT 'PKR',
+    balance DECIMAL(18, 4) NOT NULL DEFAULT 0.0000,
+    frozen_balance DECIMAL(18, 4) NOT NULL DEFAULT 0.0000,
+    available_balance DECIMAL(18, 4) NOT NULL DEFAULT 0.0000,
+    locked_balance DECIMAL(18, 4) NOT NULL DEFAULT 0.0000,
+    version BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    status ENUM('ACTIVE', 'SUSPENDED', 'FROZEN') NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_item_user (item_id, user_id),
-    INDEX idx_item_active (item_id, is_active)
+    UNIQUE KEY uk_wallet_user_currency (user_id, currency),
+    INDEX idx_wallet_status (status),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS wallet_locks (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    lock_id VARCHAR(64) NOT NULL UNIQUE,
+    wallet_id BIGINT UNSIGNED NOT NULL,
+    auction_id INT NOT NULL,
+    amount DECIMAL(18, 4) NOT NULL,
+    status ENUM('ACTIVE', 'RELEASED', 'SETTLED', 'EXPIRED') NOT NULL DEFAULT 'ACTIVE',
+    expires_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_active_wallet_auction (wallet_id, auction_id, status),
+    INDEX idx_auction_status (auction_id, status),
+    FOREIGN KEY (wallet_id) REFERENCES wallets(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    transaction_id VARCHAR(64) NOT NULL UNIQUE,
+    wallet_id BIGINT UNSIGNED NOT NULL,
+    type ENUM('DEPOSIT', 'WITHDRAWAL_PENDING', 'WITHDRAWAL_COMPLETED', 'WITHDRAWAL_REJECTED', 'BID_HOLD', 'BID_RELEASE', 'BID_WON', 'AUCTION_PAYOUT', 'PLATFORM_FEE', 'ADJUSTMENT') NOT NULL,
+    amount DECIMAL(18, 4) NOT NULL,
+    available_balance_before DECIMAL(18, 4) NOT NULL,
+    available_balance_after DECIMAL(18, 4) NOT NULL,
+    locked_balance_before DECIMAL(18, 4) NOT NULL,
+    locked_balance_after DECIMAL(18, 4) NOT NULL,
+    reference_id VARCHAR(128) NOT NULL,
+    reference_type ENUM('AUCTION', 'PAYMENT_GATEWAY', 'PAYOUT', 'SYSTEM') NOT NULL,
+    idempotency_key VARCHAR(128) NULL,
+    metadata JSON NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_tx_wallet_created (wallet_id, created_at),
+    INDEX idx_tx_reference (reference_type, reference_id),
+    FOREIGN KEY (wallet_id) REFERENCES wallets(id)
 ) ENGINE=InnoDB;
 
 -- ============================================================
--- 18. Transactions Table (Platform Wallet & Escrow Ledger)
+-- 19. Escrow Holds Audit Table
 -- ============================================================
-CREATE TABLE IF NOT EXISTS transactions (
-    id INT AUTO_INCREMENT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS escrow_holds (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
-    type VARCHAR(50) NOT NULL, -- deposit, withdrawal, bid_payment, bid_refund, sale_payout
-    amount DECIMAL(12, 2) NOT NULL,
-    balance_before DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
-    balance_after DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
-    item_id INT NULL,
-    reference_id VARCHAR(100) NULL,
-    description TEXT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'completed',
+    item_id INT NOT NULL,
+    hold_amount DECIMAL(12, 2) NOT NULL,
+    status ENUM('held', 'released', 'captured', 'forfeited') NOT NULL DEFAULT 'held',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_transactions_user (user_id),
-    INDEX idx_transactions_type (type),
-    INDEX idx_transactions_created (created_at DESC)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE,
+    INDEX idx_escrow_user_item (user_id, item_id, status)
 ) ENGINE=InnoDB;
+
+-- Performance & High-Concurrency Composite Indexes
+ALTER TABLE items ADD INDEX IF NOT EXISTS idx_items_lifecycle (status, end_time, extended_time);
+ALTER TABLE bids ADD INDEX IF NOT EXISTS idx_bids_item_rank (item_id, bid_amount DESC, id ASC);
+ALTER TABLE auto_bids ADD INDEX IF NOT EXISTS idx_autobids_escalate (item_id, is_active, max_bid_amount DESC);
 
 -- ============================================================
 -- Insert Default Data
@@ -486,12 +527,12 @@ INSERT INTO settings (`key`, `value`, `group`, type, label, sort_order) VALUES
 ('site_name', 'Geo Auction System', 'general', 'text', 'Site Name', 1),
 ('site_description', 'Premium online auction platform for premium items', 'general', 'textarea', 'Site Description', 2),
 ('site_email', 'info@geoauction.com', 'general', 'text', 'Site Email', 3),
-('site_phone', '+1-234-567-8900', 'general', 'text', 'Site Phone', 4),
-('site_address', '123 Auction Street, New York, NY 10001', 'general', 'textarea', 'Site Address', 5),
-('currency_symbol', '$', 'general', 'text', 'Currency Symbol', 6),
-('currency_code', 'USD', 'general', 'text', 'Currency Code', 7),
+('site_phone', '+92-300-1234567', 'general', 'text', 'Site Phone', 4),
+('site_address', 'Main Boulevard, Gulberg III, Lahore, Pakistan', 'general', 'textarea', 'Site Address', 5),
+('currency_symbol', 'Rs. ', 'general', 'text', 'Currency Symbol', 6),
+('currency_code', 'PKR', 'general', 'text', 'Currency Code', 7),
 ('commission_rate', '5', 'auction', 'text', 'Commission Rate (%)', 8),
-('min_bid_increment', '1', 'auction', 'text', 'Minimum Bid Increment ($)', 9),
+('min_bid_increment', '100', 'auction', 'text', 'Minimum Bid Increment (Rs.)', 9),
 ('auto_extend_enabled', '1', 'auction', 'boolean', 'Auto Extend on Last Minute Bids', 10),
 ('auto_extend_minutes', '2', 'auction', 'text', 'Auto Extend Minutes', 11),
 ('max_image_size', '5', 'upload', 'text', 'Max Image Size (MB)', 12),
@@ -503,4 +544,57 @@ INSERT INTO settings (`key`, `value`, `group`, type, label, sort_order) VALUES
 ('google_maps_api_key', '', 'api', 'text', 'Google Maps API Key', 18),
 ('enable_registration', '1', 'general', 'boolean', 'Enable User Registration', 19),
 ('require_email_verification', '0', 'general', 'boolean', 'Require Email Verification', 20);
+
+-- ============================================================
+-- 16. Manual Payment Methods & Submissions
+-- ============================================================
+CREATE TABLE IF NOT EXISTS `payment_methods` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `method_code` VARCHAR(50) NOT NULL UNIQUE,
+    `method_name` VARCHAR(100) NOT NULL,
+    `provider_name` VARCHAR(100) NOT NULL,
+    `account_title` VARCHAR(150) NOT NULL,
+    `account_number` VARCHAR(100) NOT NULL,
+    `instructions` TEXT NULL,
+    `is_enabled` TINYINT(1) NOT NULL DEFAULT 1,
+    `sort_order` INT NOT NULL DEFAULT 0,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX `idx_pm_enabled` (`is_enabled`, `sort_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `payment_submissions` (
+    `id` INT AUTO_INCREMENT PRIMARY KEY,
+    `order_id` BIGINT UNSIGNED NULL,
+    `item_id` INT NOT NULL,
+    `buyer_id` INT NOT NULL,
+    `seller_id` INT NOT NULL,
+    `payment_method_id` INT NOT NULL,
+    `payment_method_code` VARCHAR(50) NOT NULL,
+    `amount_due` DECIMAL(12,2) NOT NULL,
+    `amount_submitted` DECIMAL(12,2) NOT NULL,
+    `reference_number` VARCHAR(100) NOT NULL,
+    `payment_date` DATE NOT NULL,
+    `sender_account_info` VARCHAR(150) NULL,
+    `receipt_image` VARCHAR(255) NULL,
+    `buyer_notes` TEXT NULL,
+    `status` ENUM('Pending', 'Under Review', 'Verified', 'Rejected', 'Failed', 'Refunded') NOT NULL DEFAULT 'Pending',
+    `admin_notes` TEXT NULL,
+    `reviewed_by` INT NULL,
+    `reviewed_at` DATETIME NULL,
+    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY `uq_method_ref` (`payment_method_id`, `reference_number`),
+    INDEX `idx_sub_buyer` (`buyer_id`, `status`),
+    INDEX `idx_sub_item` (`item_id`),
+    INDEX `idx_sub_status` (`status`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO `payment_methods` (`method_code`, `method_name`, `provider_name`, `account_title`, `account_number`, `instructions`, `is_enabled`, `sort_order`)
+VALUES 
+('bank_transfer', 'Bank Alfalah Online Transfer', 'Bank Alfalah Ltd', 'Geo Auction Systems (Pvt) Ltd', 'PK36ALFH0012345678901234', 'Please transfer the exact payable amount to our Bank Alfalah corporate account. Retain the 6-12 digit Transaction Reference Number (TID) from your banking app receipt and attach it during submission.', 1, 1),
+('jazzcash', 'JazzCash Mobile Account', 'JazzCash / Mobilink Microfinance Bank', 'Geo Auction Systems', '03001234567', 'Send money via JazzCash to the mobile account number above. Enter your TID (Transaction ID) from the 8558 SMS in the reference number field.', 1, 2),
+('easypaisa', 'Easypaisa Mobile Account', 'Easypaisa / Telenor Microfinance Bank', 'Geo Auction Systems', '03451234567', 'Send money via Easypaisa App or *786# to the registered account number above. Provide the 11-digit TRX ID received from 3737 in the payment reference box.', 1, 3)
+ON DUPLICATE KEY UPDATE `method_name` = VALUES(`method_name`), `instructions` = VALUES(`instructions`);
+
 

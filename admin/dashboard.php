@@ -58,13 +58,19 @@ $stmt_bids = $pdo->prepare("SELECT COUNT(*) AS c FROM bids");
 $stmt_bids->execute();
 $total_bids = (int)$stmt_bids->fetchColumn();
 
-$stmt_rev = $pdo->prepare("SELECT SUM(current_price) AS s FROM items WHERE status IN ('ended', 'sold') AND (is_deleted = 0 OR is_deleted IS NULL)");
+$stmt_rev = $pdo->prepare("SELECT SUM(current_price) AS s FROM items WHERE status = 'ended'");
 $stmt_rev->execute();
 $total_revenue = 'Rs. ' . number_format((float)($stmt_rev->fetchColumn() ?: 0), 2);
 
 $stmt_total_items = $pdo->prepare("SELECT COUNT(*) AS c FROM items WHERE (is_deleted = 0 OR is_deleted IS NULL)");
 $stmt_total_items->execute();
 $total_auctions_count = (int)$stmt_total_items->fetchColumn();
+
+// 1.1 PENDING PAYMENTS COUNT
+$stmt_pending_pay = $pdo->prepare("SELECT COUNT(*) AS c FROM payment_submissions WHERE status IN ('Pending', 'Under Review')");
+$stmt_pending_pay->execute();
+$pending_payments_count = (int)$stmt_pending_pay->fetchColumn();
+
 
 // -------------------------------------------------------------
 // 2. ANALYTICS: 1. AUCTION ACTIVITY OVER TIME
@@ -310,8 +316,10 @@ $recent_items = $stmt_recent->fetchAll();
         <a href="categories.php"><i class="fas fa-tags me-2"></i> Categories</a>
         <a href="items.php"><i class="fas fa-box-open me-2"></i> Items</a>
         <a href="bids.php"><i class="fas fa-hand-holding-usd me-2"></i> Bids</a>
+        <a href="payments.php" class="d-flex align-items-center justify-content-between"><span class="d-flex align-items-center"><i class="fas fa-credit-card me-2"></i> Payments</span><?php if (!empty($pending_payments_count) && $pending_payments_count > 0): ?><span class="badge bg-danger rounded-pill"><?php echo $pending_payments_count; ?></span><?php endif; ?></a>
         
         <div class="nav-category">System</div>
+        <a href="settings.php"><i class="fas fa-sliders-h me-2"></i> Platform Settings</a>
         <a href="setting.php"><i class="fas fa-database me-2"></i> Database & Backup</a>
         <a href="reports.php"><i class="fas fa-chart-line me-2"></i> Reports</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>
@@ -338,6 +346,21 @@ $recent_items = $stmt_recent->fetchAll();
                 </div>
             </div>
         </div>
+
+        <?php if (!empty($pending_payments_count) && $pending_payments_count > 0): ?>
+        <div class="alert alert-warning border-0 shadow-sm rounded-3 d-flex align-items-center justify-content-between p-3 mb-4" role="alert" style="background-color: #fffbeb; border-left: 4px solid #f59e0b !important;">
+            <div class="d-flex align-items-center">
+                <i class="fas fa-exclamation-circle text-warning fs-4 me-3"></i>
+                <div>
+                    <strong class="text-dark">Manual Payments Awaiting Verification:</strong>
+                    <span class="text-muted ms-1">You have <?php echo $pending_payments_count; ?> submitted buyer payment(s) pending review and approval.</span>
+                </div>
+            </div>
+            <a href="payments.php" class="btn btn-warning btn-sm fw-bold px-3 py-1 shadow-sm text-dark">
+                Review Submissions <i class="fas fa-arrow-right ms-1"></i>
+            </a>
+        </div>
+        <?php endif; ?>
 
         <!-- ── Top Metric Summary Cards ── -->
         <div class="row g-4 mb-4">

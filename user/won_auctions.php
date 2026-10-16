@@ -21,6 +21,61 @@ if (session_status() === PHP_SESSION_NONE) {
 
 require_once __DIR__ . '/../includes/database.php';
 
+// Ensure schema existence for orders, wallets, and wallet_locks
+try {
+    $pdo = Database::getPdo();
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS `orders` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `order_number` VARCHAR(50) NOT NULL UNIQUE,
+            `auction_id` INT NOT NULL,
+            `buyer_id` INT NOT NULL,
+            `seller_id` INT NOT NULL,
+            `hammer_price` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            `platform_fee` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            `shipping_fee` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            `total_amount` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            `payment_status` VARCHAR(30) NOT NULL DEFAULT 'PAYMENT_PENDING',
+            `shipping_status` VARCHAR(30) NOT NULL DEFAULT 'PROCESSING',
+            `delivery_confirmed_at` DATETIME NULL DEFAULT NULL,
+            `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX (`auction_id`),
+            INDEX (`buyer_id`),
+            INDEX (`seller_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS `wallets` (
+            `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            `user_id` INT(11) NOT NULL,
+            `currency` VARCHAR(3) NOT NULL DEFAULT 'PKR',
+            `available_balance` DECIMAL(18, 4) NOT NULL DEFAULT 0.0000,
+            `locked_balance` DECIMAL(18, 4) NOT NULL DEFAULT 0.0000,
+            `status` VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX (`user_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS `wallet_locks` (
+            `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            `lock_id` VARCHAR(64) NOT NULL,
+            `wallet_id` BIGINT UNSIGNED NOT NULL,
+            `auction_id` INT(11) NOT NULL,
+            `amount` DECIMAL(18, 4) NOT NULL,
+            `status` VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX (`wallet_id`),
+            INDEX (`auction_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+} catch (Throwable $e) {
+    error_log("Schema ensure for won_auctions: " . $e->getMessage());
+}
+
 // 1. User Authentication & Authorization Check
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../login.php?redirect=user/won_auctions.php');
@@ -139,7 +194,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 $tx_desc = "Payment for won auction lot #" . $item_id;
                 $tx_stmt = mysqli_prepare($conn, "
                     INSERT INTO transactions (user_id, type, amount, balance_before, balance_after, item_id, description, status, created_at)
-                    VALUES (?, 'bid_payment', ?, ?, ?, ?, ?, 'completed', NOW())
+                    VALUES (?, 'winning_payment', ?, ?, ?, ?, ?, 'completed', NOW())
                 ");
                 $neg_amount = -$pay_amount;
                 mysqli_stmt_bind_param($tx_stmt, "idddis", $user_id, $neg_amount, $curr_bal, $new_bal, $item_id, $tx_desc);
@@ -285,8 +340,6 @@ include_once __DIR__ . '/../includes/header.php';
 <!-- Tailwind CSS & FontAwesome for Modern E-Commerce UI -->
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-<!-- SweetAlert2 Modern Modals -->
-<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
 
@@ -450,14 +503,14 @@ include_once __DIR__ . '/../includes/header.php';
                                     <div>
                                         <div class="flex items-center gap-2 mb-1">
                                             <span class="text-[10px] font-bold font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-700">
-                                                #<?php echo htmlspecialchars($order['auction_code']); ?>
+                                                #<?php echo htmlspecialchars((string)($order['auction_code'] ?? '')); ?>
                                             </span>
                                             <span class="text-[11px] text-slate-400 font-medium">
-                                                <?php echo htmlspecialchars($order['category_name'] ?? 'Auction'); ?>
+                                                <?php echo htmlspecialchars((string)($order['category_name'] ?? 'Auction')); ?>
                                             </span>
                                         </div>
                                         <a href="../item.php?id=<?php echo (int)$order['item_id']; ?>" class="font-bold text-slate-900 hover:text-emerald-700 transition line-clamp-1">
-                                            <?php echo htmlspecialchars($order['title']); ?>
+                                            <?php echo htmlspecialchars((string)($order['title'] ?? '')); ?>
                                         </a>
                                         <span class="text-[11px] text-slate-400 block mt-0.5">
                                             Won on <?php echo date('M d, Y', strtotime($order['end_time'])); ?>
@@ -532,28 +585,34 @@ include_once __DIR__ . '/../includes/header.php';
                             <td class="p-4 pr-6 text-right">
                                 <div class="inline-flex items-center gap-2">
                                     <?php if (!$is_paid): ?>
-                                        <!-- Complete Order / Checkout Button -->
-                                        <a href="../checkout.php?item_id=<?php echo (int)$order['item_id']; ?>" 
-                                           class="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold shadow-sm transition inline-flex items-center gap-1.5">
-                                            <i class="fa-solid fa-credit-card"></i> Pay &amp; Checkout
+                                        <!-- Pay Now Portal Button (Supports Bank Transfer, JazzCash, Easypaisa, Wallet) -->
+                                        <a href="pay.php?item_id=<?php echo (int)$order['item_id']; ?>" class="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold shadow-sm transition inline-flex items-center">
+                                            <i class="fa-solid fa-credit-card mr-1"></i> Pay Now / Manual Transfer
                                         </a>
                                     <?php else: ?>
-                                        <!-- Invoice Button -->
-                                        <a href="../checkout.php?item_id=<?php echo (int)$order['item_id']; ?>" 
-                                           class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold transition inline-flex items-center gap-1.5">
-                                            <i class="fa-solid fa-receipt"></i> Invoice
-                                        </a>
+                                        <!-- Invoice Buttons (View & PDF Download) -->
+                                        <div class="inline-flex rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+                                            <a href="../invoice.php?order_id=<?php echo (int)($order['order_id'] ?? 0); ?>&item_id=<?php echo (int)$order['item_id']; ?>" 
+                                               class="px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-800 text-xs font-bold border-r border-slate-200 transition inline-flex items-center gap-1"
+                                               title="View Interactive Invoice">
+                                                <i class="fa-solid fa-receipt text-emerald-700"></i> Invoice
+                                            </a>
+                                            <a href="../invoice.php?order_id=<?php echo (int)($order['order_id'] ?? 0); ?>&item_id=<?php echo (int)$order['item_id']; ?>&format=download" 
+                                               class="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-xs font-bold transition inline-flex items-center gap-1"
+                                               title="Download Official PDF Receipt">
+                                                <i class="fa-solid fa-file-arrow-down text-emerald-600"></i> PDF
+                                            </a>
+                                        </div>
                                     <?php endif; ?>
 
                                     <?php if ($ship_status === 'SHIPPED'): ?>
-                                        <!-- Confirm Delivery via SweetAlert2 -->
-                                        <form method="POST" action="" id="deliveryForm_<?php echo (int)$order['order_id']; ?>">
+                                        <!-- Confirm Delivery -->
+                                        <form method="POST" action="" onsubmit="return confirm('Confirm that you have received this parcel in good condition?');">
                                             <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                             <input type="hidden" name="action" value="confirm_delivery">
                                             <input type="hidden" name="order_id" value="<?php echo (int)$order['order_id']; ?>">
-                                            <button type="button" onclick="confirmDelivery(<?php echo (int)$order['order_id']; ?>)" 
-                                                    class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-sm transition inline-flex items-center gap-1.5">
-                                                <i class="fa-solid fa-check-double"></i> Received
+                                            <button type="submit" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold shadow-sm transition">
+                                                <i class="fa-solid fa-check-double mr-1"></i> Received
                                             </button>
                                         </form>
                                     <?php endif; ?>
@@ -652,30 +711,6 @@ function openContactSellerModal(name, email, phone) {
 
 function closeContactSellerModal() {
     document.getElementById('contactSellerModal').classList.add('hidden');
-}
-
-function confirmDelivery(orderId) {
-    if (typeof Swal === 'undefined') {
-        if (confirm('Confirm that you have received this parcel in good condition?')) {
-            document.getElementById('deliveryForm_' + orderId).submit();
-        }
-        return;
-    }
-
-    Swal.fire({
-        title: 'Confirm Delivery',
-        text: 'Are you sure you have received this auction lot in good condition? This will mark the order as Completed.',
-        icon: 'question',
-        showCancelButton: true,
-        confirmButtonColor: '#4f46e5',
-        cancelButtonColor: '#64748b',
-        confirmButtonText: '<i class="fa-solid fa-check"></i> Yes, Parcel Received',
-        cancelButtonText: 'Cancel'
-    }).then((result) => {
-        if (result.isConfirmed) {
-            document.getElementById('deliveryForm_' + orderId).submit();
-        }
-    });
 }
 </script>
 

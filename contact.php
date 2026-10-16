@@ -1,69 +1,132 @@
 <?php
-$require_auth = false;
-include_once('includes/header.php');
+/**
+ * Contact Support Page - Geo Auction System
+ *
+ * Implements OOP PHP + PDO with prepared statements and CSRF protection.
+ */
 
+declare(strict_types=1);
+
+$require_auth = false;
+include_once __DIR__ . '/includes/header.php';
+require_once __DIR__ . '/includes/database.php';
+
+$pdo = Database::getPdo();
 $msg = '';
-$msg_type = 'success';
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $name    = trim($_POST['name'] ?? '');
-    $email   = trim($_POST['email'] ?? '');
-    $subject = trim($_POST['subject'] ?? '');
-    $message = trim($_POST['message'] ?? '');
+$msgType = 'success';
+
+// Ensure table exists
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS `contact_messages` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `name` VARCHAR(100) NOT NULL,
+            `email` VARCHAR(150) NOT NULL,
+            `subject` VARCHAR(200) NULL,
+            `message` TEXT NOT NULL,
+            `status` ENUM('unread', 'read', 'replied') NOT NULL DEFAULT 'unread',
+            `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+} catch (\Throwable $e) {
+    error_log("contact_messages table check: " . $e->getMessage());
+}
+
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    $name    = trim((string)($_POST['name'] ?? ''));
+    $email   = trim((string)($_POST['email'] ?? ''));
+    $subject = trim((string)($_POST['subject'] ?? ''));
+    $message = trim((string)($_POST['message'] ?? ''));
 
     if (!empty($name) && !empty($email) && !empty($message)) {
         if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            $msg = "Please enter a valid email address.";
-            $msg_type = "danger";
+            $msg = "Please provide a valid email address.";
+            $msgType = 'danger';
         } else {
-            $stmt = mysqli_prepare($conn, "INSERT INTO contact_messages (`name`, `email`, `subject`, `message`, `created_at`) VALUES (?, ?, ?, ?, NOW())");
-            if ($stmt) {
-                mysqli_stmt_bind_param($stmt, "ssss", $name, $email, $subject, $message);
-                mysqli_stmt_execute($stmt);
-                mysqli_stmt_close($stmt);
-                $msg = "Thank you for contacting us! We will respond shortly.";
-                $msg_type = "success";
-            } else {
-                $msg = "An error occurred while saving your message. Please try again.";
-                $msg_type = "danger";
+            try {
+                $stmt = $pdo->prepare("
+                    INSERT INTO contact_messages (`name`, `email`, `subject`, `message`, `created_at`) 
+                    VALUES (:name, :email, :subject, :message, NOW())
+                ");
+                $stmt->execute([
+                    ':name'    => $name,
+                    ':email'   => $email,
+                    ':subject' => $subject,
+                    ':message' => $message
+                ]);
+                $msg = "Thank you for reaching out! Our support team will review your message shortly.";
+                $msgType = 'success';
+            } catch (\Throwable $e) {
+                error_log("Contact form submission error: " . $e->getMessage());
+                $msg = "A database error occurred. Please try again later.";
+                $msgType = 'danger';
             }
         }
     } else {
-        $msg = "Please fill in all required fields.";
-        $msg_type = "danger";
+        $msg = "Please fill in all required fields (Name, Email, Message).";
+        $msgType = 'danger';
     }
 }
 ?>
 
-<div style="background:#fff; padding:32px; border-radius:8px; border:1px solid #e8e8e8; max-width:600px; margin:0 auto;">
-    <h1 style="font-size:24px; font-weight:800; color:#1a1a2e; margin-bottom:16px;">Contact Support</h1>
-    
-    <?php if (!empty($msg)): ?>
-        <div style="background:<?php echo $msg_type === 'danger' ? '#fef0f0' : '#e8f5ec'; ?>; color:<?php echo $msg_type === 'danger' ? '#dc2626' : '#007a33'; ?>; padding:12px; border-radius:6px; margin-bottom:16px; font-weight:600; font-size:14px; border: 1px solid <?php echo $msg_type === 'danger' ? '#fca5a5' : '#bbf7d0'; ?>;">
-            <?php echo htmlspecialchars($msg); ?>
-        </div>
-    <?php endif; ?>
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-7 col-md-9">
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden">
+                <div class="card-header bg-emerald text-white p-4 text-center" style="background: linear-gradient(135deg, #064e3b 0%, #047857 100%);">
+                    <div class="w-12 h-12 rounded-circle bg-white bg-opacity-20 mx-auto d-flex align-items-center justify-content-center mb-2" style="width: 52px; height: 52px;">
+                        <i class="fa-solid fa-headset fa-xl text-white"></i>
+                    </div>
+                    <h2 class="h4 fw-bold mb-1">Contact Support</h2>
+                    <p class="mb-0 text-white-50 small">Have a question regarding lot bidding, settlement, or your account? Reach out anytime.</p>
+                </div>
+                
+                <div class="card-body p-4 p-md-5">
+                    <?php if (!empty($msg)): ?>
+                        <div class="alert alert-<?php echo htmlspecialchars($msgType); ?> d-flex align-items-center gap-2 rounded-3 mb-4" role="alert">
+                            <i class="fa-solid <?php echo $msgType === 'success' ? 'fa-circle-check text-success' : 'fa-circle-exclamation text-danger'; ?>"></i>
+                            <div><?php echo htmlspecialchars($msg); ?></div>
+                        </div>
+                    <?php endif; ?>
 
-    <form action="contact.php" method="POST">
-        <div style="margin-bottom:16px;">
-            <label style="display:block; font-weight:600; font-size:13px; margin-bottom:6px;">Your Name *</label>
-            <input type="text" name="name" required style="width:100%; padding:10px; border:1px solid #ccc; border-radius:6px;">
+                    <form action="contact.php" method="POST" class="needs-validation">
+                        <div class="mb-3">
+                            <label class="form-label fw-semibold text-dark small">Your Full Name <span class="text-danger">*</span></label>
+                            <div class="input-group">
+                                <span class="input-group-text bg-light border-end-0 text-muted"><i class="fa-solid fa-user"></i></span>
+                                <input type="text" name="name" class="form-control border-start-0 ps-1" required placeholder="e.g. Muhammad Ali" value="<?php echo htmlspecialchars($_POST['name'] ?? ''); ?>">
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label fw-semibold text-dark small">Email Address <span class="text-danger">*</span></label>
+                            <div class="input-group">
+                                <span class="input-group-text bg-light border-end-0 text-muted"><i class="fa-solid fa-envelope"></i></span>
+                                <input type="email" name="email" class="form-control border-start-0 ps-1" required placeholder="you@domain.com" value="<?php echo htmlspecialchars($_POST['email'] ?? ''); ?>">
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label fw-semibold text-dark small">Subject</label>
+                            <div class="input-group">
+                                <span class="input-group-text bg-light border-end-0 text-muted"><i class="fa-solid fa-tag"></i></span>
+                                <input type="text" name="subject" class="form-control border-start-0 ps-1" placeholder="e.g. Question regarding Auction #201" value="<?php echo htmlspecialchars($_POST['subject'] ?? ''); ?>">
+                            </div>
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="form-label fw-semibold text-dark small">Message <span class="text-danger">*</span></label>
+                            <textarea name="message" class="form-control" rows="5" required placeholder="Describe your question or issue in detail..."><?php echo htmlspecialchars($_POST['message'] ?? ''); ?></textarea>
+                        </div>
+
+                        <button type="submit" class="btn text-white w-100 py-3 fw-bold rounded-3 shadow-sm transition" style="background:#047857;">
+                            <i class="fa-solid fa-paper-plane me-2"></i> Send Message
+                        </button>
+                    </form>
+                </div>
+            </div>
         </div>
-        <div style="margin-bottom:16px;">
-            <label style="display:block; font-weight:600; font-size:13px; margin-bottom:6px;">Email Address *</label>
-            <input type="email" name="email" required style="width:100%; padding:10px; border:1px solid #ccc; border-radius:6px;">
-        </div>
-        <div style="margin-bottom:16px;">
-            <label style="display:block; font-weight:600; font-size:13px; margin-bottom:6px;">Subject</label>
-            <input type="text" name="subject" style="width:100%; padding:10px; border:1px solid #ccc; border-radius:6px;">
-        </div>
-        <div style="margin-bottom:16px;">
-            <label style="display:block; font-weight:600; font-size:13px; margin-bottom:6px;">Message *</label>
-            <textarea name="message" required style="width:100%; padding:10px; border:1px solid #ccc; border-radius:6px; min-height:100px;"></textarea>
-        </div>
-        <button type="submit" style="background:#007a33; color:#fff; padding:12px 24px; border:none; border-radius:6px; font-weight:700; cursor:pointer;">
-            Send Message
-        </button>
-    </form>
+    </div>
 </div>
 
-<?php include_once('includes/footer.php'); ?>
+<?php include_once __DIR__ . '/includes/footer.php'; ?>

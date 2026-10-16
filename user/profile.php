@@ -14,10 +14,8 @@
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
-
-require_once __DIR__ . '/../includes/database.php';
-require_once __DIR__ . '/../includes/components/profile_reviews_messages.php';
-
+    require_once __DIR__ . '/../includes/database.php';
+    require_once __DIR__ . '/../includes/components/profile_reviews_messages.php';
 if (!isset($_SESSION['user_id'])) {
     header("Location: ../login.php?redirect=user/profile.php");
     exit();
@@ -27,6 +25,12 @@ $logged_in_user_id = (int)$_SESSION['user_id'];
 $requested_user_id = isset($_GET['user_id']) ? (int)$_GET['user_id'] : (isset($_GET['id']) ? (int)$_GET['id'] : $logged_in_user_id);
 $is_own_profile    = ($requested_user_id === $logged_in_user_id || $requested_user_id <= 0);
 $user_id           = $is_own_profile ? $logged_in_user_id : $requested_user_id;
+
+// Forward to canonical root profile.php when viewing own profile
+if ($is_own_profile && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && empty($_GET['tab'])) {
+    header("Location: ../profile.php");
+    exit();
+}
 $curr_sess_id = session_id();
 
 // Track current session in user_sessions table
@@ -34,16 +38,20 @@ if (!empty($curr_sess_id)) {
     $ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
     $ua = substr($_SERVER['HTTP_USER_AGENT'] ?? 'Unknown Browser', 0, 500);
     $now_ts = time();
-    $sess_chk = mysqli_prepare($conn, "
-        INSERT INTO user_sessions (id, user_id, ip_address, user_agent, payload, last_activity)
-        VALUES (?, ?, ?, ?, '', ?)
-        ON DUPLICATE KEY UPDATE ip_address = VALUES(ip_address), user_agent = VALUES(user_agent), last_activity = VALUES(last_activity)
-    ");
-    if ($sess_chk) {
-        mysqli_stmt_bind_param($sess_chk, "sissi", $curr_sess_id, $user_id, $ip, $ua, $now_ts);
-        mysqli_stmt_execute($sess_chk);
-        mysqli_stmt_close($sess_chk);
-    }
+    try {
+        $sess_chk = $pdo->prepare("
+            INSERT INTO user_sessions (id, user_id, ip_address, user_agent, payload, last_activity)
+            VALUES (:id, :uid, :ip, :ua, '', :act)
+            ON DUPLICATE KEY UPDATE ip_address = VALUES(ip_address), user_agent = VALUES(user_agent), last_activity = VALUES(last_activity)
+        ");
+        $sess_chk->execute([
+            ':id'  => $curr_sess_id,
+            ':uid' => $user_id,
+            ':ip'  => $ip,
+            ':ua'  => $ua,
+            ':act' => $now_ts
+        ]);
+    } catch (\Throwable $e) {}
 }
 
 // CSRF Protection Token Generation
@@ -59,7 +67,7 @@ $active_tab      = $_GET['tab'] ?? 'general';
 // -------------------------------------------------------------
 // POST Request Processing
 // -------------------------------------------------------------
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     // 1. Verify CSRF Token
     $submitted_token = $_POST['csrf_token'] ?? '';
     if (!hash_equals($_SESSION['csrf_token'], $submitted_token)) {
@@ -76,6 +84,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $phone            = trim($_POST['phone'] ?? '');
             $shipping_address = trim($_POST['shipping_address'] ?? '');
             $cnic_tax_id      = trim($_POST['cnic_tax_id'] ?? '');
+            $designation      = trim($_POST['designation'] ?? '');
             $bio              = trim($_POST['bio'] ?? '');
 
             if (empty($name)) {
@@ -83,22 +92,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else {
                 // Check if username is already taken by someone else
                 if (!empty($username)) {
-                    $u_chk = mysqli_prepare($conn, "SELECT id FROM users WHERE username = ? AND id != ? LIMIT 1");
-                    mysqli_stmt_bind_param($u_chk, "si", $username, $user_id);
-                    mysqli_stmt_execute($u_chk);
-                    if (mysqli_fetch_assoc(mysqli_stmt_get_result($u_chk))) {
-                        $error_message = 'The username "' . htmlspecialchars($username) . '" is already taken. Please choose another.';
-                    }
-                    mysqli_stmt_close($u_chk);
+                    try {
+                        $u_chk = $pdo->prepare("SELECT id FROM users WHERE username = :un AND id != :uid LIMIT 1");
+                        $u_chk->execute([':un' => $username, ':uid' => $user_id]);
+                        if ($u_chk->fetch()) {
+                            $error_message = 'The username "' . htmlspecialchars($username) . '" is already taken. Please choose another.';
+                        }
+                    } catch (\Throwable $e) {}
                 }
 
                 if (empty($error_message)) {
                     // Fetch current user details
-                    $u_stmt = mysqli_prepare($conn, "SELECT avatar, settings FROM users WHERE id = ?");
-                    mysqli_stmt_bind_param($u_stmt, "i", $user_id);
-                    mysqli_stmt_execute($u_stmt);
-                    $curr_user = mysqli_fetch_assoc(mysqli_stmt_get_result($u_stmt));
-                    mysqli_stmt_close($u_stmt);
+                    $u_stmt = $pdo->prepare("SELECT avatar, settings FROM users WHERE id = :uid");
+                    $u_stmt->execute([':uid' => $user_id]);
+                    $curr_user = $u_stmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
                     $avatar_path = $curr_user['avatar'] ?? '';
                     $settings    = json_decode($curr_user['settings'] ?? '{}', true) ?: [];
@@ -108,20 +115,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $file_tmp  = $_FILES['avatar']['tmp_name'];
                         $file_name = $_FILES['avatar']['name'];
                         $file_size = $_FILES['avatar']['size'];
-                        $allowed_types = ['image/jpeg', 'image/png', 'image/webp'];
+                        $allowed_types = ['image/jpeg', 'image/pjpeg', 'image/png', 'image/x-png', 'image/webp', 'image/gif', 'image/avif', 'image/x-jfif'];
+                        $allowed_exts  = ['jpg', 'jpeg', 'png', 'webp', 'jfif', 'pjpeg', 'gif', 'avif'];
 
-                        $file_mime = mime_content_type($file_tmp);
-                        if (!in_array($file_mime, $allowed_types)) {
-                            $error_message = 'Invalid image format. Only JPG, PNG, and WEBP are permitted.';
-                        } elseif ($file_size > 2 * 1024 * 1024) { // 2MB Limit
-                            $error_message = 'Avatar file size exceeds the 2MB limit.';
+                        $file_ext  = strtolower(pathinfo($file_name, PATHINFO_EXTENSION));
+                        $file_mime = function_exists('mime_content_type') ? mime_content_type($file_tmp) : '';
+                        $img_info  = @getimagesize($file_tmp);
+                        if (!empty($img_info['mime']) && empty($file_mime)) {
+                            $file_mime = $img_info['mime'];
+                        }
+
+                        if ((!in_array($file_mime, $allowed_types, true) && $img_info === false) || !in_array($file_ext, $allowed_exts, true)) {
+                            $error_message = 'Invalid image format. Supported formats: JPG, PNG, WEBP, JFIF, and GIF.';
+                        } elseif ($file_size > 8 * 1024 * 1024) { // 8MB Limit
+                            $error_message = 'Avatar file size exceeds the 8MB limit.';
                         } else {
                             $upload_dir = __DIR__ . '/../uploads/avatars/';
                             if (!is_dir($upload_dir)) {
                                 mkdir($upload_dir, 0755, true);
                             }
-                            $file_ext = strtolower(pathinfo($file_name, PATHINFO_EXTENSION));
-                            $new_filename = 'avatar_' . $user_id . '_' . bin2hex(random_bytes(6)) . '.' . $file_ext;
+                            $normalized_ext = match($file_ext) {
+                                'jpeg', 'jfif', 'pjpeg' => 'jpg',
+                                'png' => 'png',
+                                'webp' => 'webp',
+                                'gif' => 'gif',
+                                'avif' => 'avif',
+                                default => 'jpg'
+                            };
+                            $new_filename = 'avatar_' . $user_id . '_' . bin2hex(random_bytes(6)) . '.' . $normalized_ext;
                             $destination = $upload_dir . $new_filename;
 
                             if (move_uploaded_file($file_tmp, $destination)) {
@@ -143,23 +164,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $settings['cnic_tax_id']      = $cnic_tax_id;
                         $settings_json = json_encode($settings);
 
-                        // Direct column update in users table
-                        $up_stmt = mysqli_prepare($conn, "
-                            UPDATE users 
-                            SET name = ?, username = ?, phone = ?, bio = ?, avatar = ?, shipping_address = ?, cnic_tax_id = ?, settings = ? 
-                            WHERE id = ?
-                        ");
-                        $u_param = !empty($username) ? $username : null;
-                        mysqli_stmt_bind_param($up_stmt, "ssssssssi", $name, $u_param, $phone, $bio, $avatar_path, $shipping_address, $cnic_tax_id, $settings_json, $user_id);
-                        
-                        if (mysqli_stmt_execute($up_stmt)) {
+                        // Update in users table
+                        try {
+                            $up_stmt = $pdo->prepare("
+                                UPDATE users 
+                                SET name = :name, username = :username, phone = :phone, designation = :designation, bio = :bio, avatar = :avatar, shipping_address = :shipping_address, cnic_tax_id = :cnic, settings = :settings 
+                                WHERE id = :uid
+                            ");
+                            $up_stmt->execute([
+                                ':name'             => $name,
+                                ':username'         => !empty($username) ? $username : null,
+                                ':phone'            => $phone,
+                                ':designation'      => $designation,
+                                ':bio'              => $bio,
+                                ':avatar'           => $avatar_path,
+                                ':shipping_address' => $shipping_address,
+                                ':cnic'             => $cnic_tax_id,
+                                ':settings'         => $settings_json,
+                                ':uid'              => $user_id
+                            ]);
                             $_SESSION['user_name'] = $name;
                             $_SESSION['user_avatar'] = $avatar_path;
                             $success_message = 'Profile information and KYC details updated successfully!';
-                        } else {
-                            $error_message = 'Database update error: ' . mysqli_stmt_error($up_stmt);
+                        } catch (\Throwable $e) {
+                            try {
+                                $up_fallback = $pdo->prepare("
+                                    UPDATE users 
+                                    SET name = :name, phone = :phone, bio = :bio, avatar = :avatar, settings = :settings 
+                                    WHERE id = :uid
+                                ");
+                                $up_fallback->execute([
+                                    ':name'     => $name,
+                                    ':phone'    => $phone,
+                                    ':bio'      => $bio,
+                                    ':avatar'   => $avatar_path,
+                                    ':settings' => $settings_json,
+                                    ':uid'      => $user_id
+                                ]);
+                                $_SESSION['user_name'] = $name;
+                                $_SESSION['user_avatar'] = $avatar_path;
+                                $success_message = 'Profile information updated successfully!';
+                            } catch (\Throwable $e2) {
+                                $error_message = 'Database update error: ' . $e2->getMessage();
+                            }
                         }
-                        mysqli_stmt_close($up_stmt);
                     }
                 }
             }
@@ -201,18 +249,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     if (move_uploaded_file($file_tmp, $target_file)) {
                         $doc_rel_path = 'uploads/kyc/' . $clean_name;
-
-                        $k_stmt = mysqli_prepare($conn, "
-                            INSERT INTO user_kyc_verifications (user_id, document_type, document_path, status, created_at)
-                            VALUES (?, ?, ?, 'PENDING', NOW())
-                        ");
-                        if ($k_stmt) {
-                            mysqli_stmt_bind_param($k_stmt, "iss", $user_id, $doc_type, $doc_rel_path);
-                            mysqli_stmt_execute($k_stmt);
-                            mysqli_stmt_close($k_stmt);
+                        try {
+                            $k_stmt = $pdo->prepare("
+                                INSERT INTO user_kyc_verifications (user_id, document_type, document_path, status, created_at)
+                                VALUES (:uid, :dtype, :dpath, 'PENDING', NOW())
+                            ");
+                            $k_stmt->execute([
+                                ':uid'   => $user_id,
+                                ':dtype' => $doc_type,
+                                ':dpath' => $doc_rel_path
+                            ]);
                             $success_message = 'Document uploaded successfully! Our compliance team will review your verification shortly.';
-                        } else {
-                            $error_message = 'Failed to register verification record in database.';
+                        } catch (\Throwable $e) {
+                            $error_message = 'Failed to register verification record in database: ' . $e->getMessage();
                         }
                     } else {
                         $error_message = 'Failed to save uploaded document to server storage.';
@@ -237,24 +286,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif (strlen($new_password) < 8) {
                 $error_message = 'New password must be at least 8 characters in length.';
             } else {
-                $pw_stmt = mysqli_prepare($conn, "SELECT password FROM users WHERE id = ?");
-                mysqli_stmt_bind_param($pw_stmt, "i", $user_id);
-                mysqli_stmt_execute($pw_stmt);
-                $pw_res = mysqli_fetch_assoc(mysqli_stmt_get_result($pw_stmt));
-                mysqli_stmt_close($pw_stmt);
+                $pw_stmt = $pdo->prepare("SELECT password FROM users WHERE id = :uid");
+                $pw_stmt->execute([':uid' => $user_id]);
+                $pw_res = $pw_stmt->fetch(PDO::FETCH_ASSOC);
 
                 if (!$pw_res || !password_verify($current_password, $pw_res['password'])) {
                     $error_message = 'Current password entered is incorrect.';
                 } else {
                     $new_hash = password_hash($new_password, PASSWORD_BCRYPT);
-                    $up_pw = mysqli_prepare($conn, "UPDATE users SET password = ? WHERE id = ?");
-                    mysqli_stmt_bind_param($up_pw, "si", $new_hash, $user_id);
-                    if (mysqli_stmt_execute($up_pw)) {
-                        $success_message = 'Your password has been changed securely.';
-                    } else {
-                        $error_message = 'Failed to update password: ' . mysqli_stmt_error($up_pw);
-                    }
-                    mysqli_stmt_close($up_pw);
+                    $up_pw = $pdo->prepare("UPDATE users SET password = :pw WHERE id = :uid");
+                    $up_pw->execute([':pw' => $new_hash, ':uid' => $user_id]);
+                    $success_message = 'Your password has been changed securely.';
                 }
             }
             $active_tab = 'security';
@@ -265,18 +307,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // -----------------------------------------------------
         if ($action === 'revoke_sessions') {
             $new_token = bin2hex(random_bytes(32));
-            $rev_stmt = mysqli_prepare($conn, "UPDATE users SET remember_token = ? WHERE id = ?");
-            mysqli_stmt_bind_param($rev_stmt, "si", $new_token, $user_id);
-            mysqli_stmt_execute($rev_stmt);
-            mysqli_stmt_close($rev_stmt);
+            try {
+                $rev_stmt = $pdo->prepare("UPDATE users SET remember_token = :rt WHERE id = :uid");
+                $rev_stmt->execute([':rt' => $new_token, ':uid' => $user_id]);
+            } catch (\Throwable $e) {}
 
-            // Clean other active sessions from user_sessions table
-            $del_sess = mysqli_prepare($conn, "DELETE FROM user_sessions WHERE user_id = ? AND id != ?");
-            if ($del_sess) {
-                mysqli_stmt_bind_param($del_sess, "is", $user_id, $curr_sess_id);
-                mysqli_stmt_execute($del_sess);
-                mysqli_stmt_close($del_sess);
-            }
+            try {
+                $del_sess = $pdo->prepare("DELETE FROM user_sessions WHERE user_id = :uid AND id != :curr");
+                $del_sess->execute([':uid' => $user_id, ':curr' => $curr_sess_id]);
+            } catch (\Throwable $e) {}
 
             $success_message = 'Successfully logged out all other active sessions and devices.';
             $active_tab = 'security';
@@ -292,31 +331,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $email_newsletter = isset($_POST['email_newsletter']) ? 1 : 0;
             $sms_bids         = isset($_POST['sms_bids']) ? 1 : 0;
 
-            // Check if record exists
-            $chk_n = mysqli_prepare($conn, "SELECT id FROM user_notifications WHERE user_id = ?");
-            mysqli_stmt_bind_param($chk_n, "i", $user_id);
-            mysqli_stmt_execute($chk_n);
-            $has_notif = mysqli_fetch_assoc(mysqli_stmt_get_result($chk_n));
-            mysqli_stmt_close($chk_n);
-
-            if ($has_notif) {
-                $n_up = mysqli_prepare($conn, "
-                    UPDATE user_notifications 
-                    SET email_bids = ?, email_outbid = ?, email_won = ?, email_newsletter = ?, sms_bids = ? 
-                    WHERE user_id = ?
-                ");
-                mysqli_stmt_bind_param($n_up, "iiiiii", $email_bids, $email_outbid, $email_won, $email_newsletter, $sms_bids, $user_id);
-                mysqli_stmt_execute($n_up);
-                mysqli_stmt_close($n_up);
-            } else {
-                $n_ins = mysqli_prepare($conn, "
-                    INSERT INTO user_notifications (user_id, email_bids, email_outbid, email_won, email_newsletter, sms_bids) 
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ");
-                mysqli_stmt_bind_param($n_ins, "iiiiii", $user_id, $email_bids, $email_outbid, $email_won, $email_newsletter, $sms_bids);
-                mysqli_stmt_execute($n_ins);
-                mysqli_stmt_close($n_ins);
-            }
+            try {
+                $chk_n = $pdo->prepare("SELECT id FROM user_notifications WHERE user_id = :uid");
+                $chk_n->execute([':uid' => $user_id]);
+                if ($chk_n->fetch()) {
+                    $n_up = $pdo->prepare("
+                        UPDATE user_notifications 
+                        SET email_bids = :b, email_outbid = :o, email_won = :w, email_newsletter = :nl, sms_bids = :sms 
+                        WHERE user_id = :uid
+                    ");
+                    $n_up->execute([
+                        ':b'   => $email_bids,
+                        ':o'   => $email_outbid,
+                        ':w'   => $email_won,
+                        ':nl'  => $email_newsletter,
+                        ':sms' => $sms_bids,
+                        ':uid' => $user_id
+                    ]);
+                } else {
+                    $n_ins = $pdo->prepare("
+                        INSERT INTO user_notifications (user_id, email_bids, email_outbid, email_won, email_newsletter, sms_bids) 
+                        VALUES (:uid, :b, :o, :w, :nl, :sms)
+                    ");
+                    $n_ins->execute([
+                        ':uid' => $user_id,
+                        ':b'   => $email_bids,
+                        ':o'   => $email_outbid,
+                        ':w'   => $email_won,
+                        ':nl'  => $email_newsletter,
+                        ':sms' => $sms_bids
+                    ]);
+                }
+            } catch (\Throwable $e) {}
 
             $success_message = 'Notification preferences updated successfully.';
             $active_tab = 'security';
@@ -329,11 +375,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // -------------------------------------------------------------
 
 // 1. Fetch User Profile
-$u_query = mysqli_prepare($conn, "SELECT * FROM users WHERE id = ?");
-mysqli_stmt_bind_param($u_query, "i", $user_id);
-mysqli_stmt_execute($u_query);
-$user = mysqli_fetch_assoc(mysqli_stmt_get_result($u_query));
-mysqli_stmt_close($u_query);
+$u_query = $pdo->prepare("SELECT * FROM users WHERE id = :uid");
+$u_query->execute([':uid' => $user_id]);
+$user = $u_query->fetch(PDO::FETCH_ASSOC) ?: [];
 
 $settings = json_decode($user['settings'] ?? '{}', true) ?: [];
 $username = $user['username'] ?? ($settings['username'] ?? '');
@@ -344,29 +388,19 @@ $kyc_verified_at = $user['kyc_verified_at'] ?? null;
 
 // 2. Fetch User KYC Documents Audit
 $kyc_docs = [];
-$kd_stmt = mysqli_prepare($conn, "SELECT * FROM user_kyc_verifications WHERE user_id = ? ORDER BY created_at DESC");
-if ($kd_stmt) {
-    mysqli_stmt_bind_param($kd_stmt, "i", $user_id);
-    mysqli_stmt_execute($kd_stmt);
-    $kd_res = mysqli_stmt_get_result($kd_stmt);
-    while ($krow = mysqli_fetch_assoc($kd_res)) {
-        $kyc_docs[] = $krow;
-    }
-    mysqli_stmt_close($kd_stmt);
-}
+try {
+    $kd_stmt = $pdo->prepare("SELECT * FROM user_kyc_verifications WHERE user_id = :uid ORDER BY created_at DESC");
+    $kd_stmt->execute([':uid' => $user_id]);
+    $kyc_docs = $kd_stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (\Throwable $e) {}
 
 // 3. Fetch Active Devices & Sessions
 $active_sessions = [];
-$s_stmt = mysqli_prepare($conn, "SELECT * FROM user_sessions WHERE user_id = ? ORDER BY last_activity DESC");
-if ($s_stmt) {
-    mysqli_stmt_bind_param($s_stmt, "i", $user_id);
-    mysqli_stmt_execute($s_stmt);
-    $s_res = mysqli_stmt_get_result($s_stmt);
-    while ($srow = mysqli_fetch_assoc($s_res)) {
-        $active_sessions[] = $srow;
-    }
-    mysqli_stmt_close($s_stmt);
-}
+try {
+    $s_stmt = $pdo->prepare("SELECT * FROM user_sessions WHERE user_id = :uid ORDER BY last_activity DESC");
+    $s_stmt->execute([':uid' => $user_id]);
+    $active_sessions = $s_stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (\Throwable $e) {}
 
 // 4. Fetch Wallet & Balances
 $available_balance = (float)($user['balance'] ?? 0);
@@ -377,89 +411,83 @@ $active_bids_query = "
            i.title, i.auction_code, i.current_price, i.end_time, i.featured_image, i.status AS item_status
     FROM bids b
     JOIN items i ON b.item_id = i.id
-    WHERE b.user_id = ? AND i.status = 'active'
+    WHERE b.user_id = :uid AND i.status = 'active'
     ORDER BY i.end_time ASC
 ";
-$stmt_bids = mysqli_prepare($conn, $active_bids_query);
-mysqli_stmt_bind_param($stmt_bids, "i", $user_id);
-mysqli_stmt_execute($stmt_bids);
-$bids_res = mysqli_stmt_get_result($stmt_bids);
 $active_bids = [];
 $locked_balance = 0.0;
-while ($row = mysqli_fetch_assoc($bids_res)) {
-    $active_bids[] = $row;
-    if ($row['is_winning']) {
-        $locked_balance += (float)$row['bid_amount'];
+try {
+    $stmt_bids = $pdo->prepare($active_bids_query);
+    $stmt_bids->execute([':uid' => $user_id]);
+    while ($row = $stmt_bids->fetch(PDO::FETCH_ASSOC)) {
+        $active_bids[] = $row;
+        if (!empty($row['is_winning'])) {
+            $locked_balance += (float)$row['bid_amount'];
+        }
     }
-}
-mysqli_stmt_close($stmt_bids);
+} catch (\Throwable $e) {}
 $total_balance = $available_balance + $locked_balance;
 
 // 5. Fetch Won Auctions
 $won_query = "
     SELECT i.*, p.payment_status, p.paid_at, p.id AS payment_id
     FROM items i
-    LEFT JOIN payments p ON p.item_id = i.id AND p.user_id = ?
-    WHERE i.winner_id = ?
+    LEFT JOIN payments p ON p.item_id = i.id AND p.user_id = :uid1
+    WHERE i.winner_id = :uid2
     ORDER BY i.end_time DESC
 ";
-$stmt_won = mysqli_prepare($conn, $won_query);
-mysqli_stmt_bind_param($stmt_won, "ii", $user_id, $user_id);
-mysqli_stmt_execute($stmt_won);
-$won_res = mysqli_stmt_get_result($stmt_won);
 $won_auctions = [];
-while ($w = mysqli_fetch_assoc($won_res)) {
-    $won_auctions[] = $w;
-}
-mysqli_stmt_close($stmt_won);
+try {
+    $stmt_won = $pdo->prepare($won_query);
+    $stmt_won->execute([':uid1' => $user_id, ':uid2' => $user_id]);
+    $won_auctions = $stmt_won->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (\Throwable $e) {}
 
 // 6. Fetch Watchlist
 $watch_query = "
     SELECT w.id AS watch_id, i.id AS item_id, i.title, i.auction_code, i.current_price, i.end_time, i.featured_image, i.status
     FROM wishlist w
     JOIN items i ON w.item_id = i.id
-    WHERE w.user_id = ?
+    WHERE w.user_id = :uid
     ORDER BY w.created_at DESC
 ";
-$stmt_watch = mysqli_prepare($conn, $watch_query);
-mysqli_stmt_bind_param($stmt_watch, "i", $user_id);
-mysqli_stmt_execute($stmt_watch);
-$watch_res = mysqli_stmt_get_result($stmt_watch);
 $watchlist = [];
-while ($wl = mysqli_fetch_assoc($watch_res)) {
-    $watchlist[] = $wl;
-}
-mysqli_stmt_close($stmt_watch);
+try {
+    $stmt_watch = $pdo->prepare($watch_query);
+    $stmt_watch->execute([':uid' => $user_id]);
+    $watchlist = $stmt_watch->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (\Throwable $e) {}
 
 // 7. Fetch Recent Transactions
 $tx_query = "
     SELECT * FROM transactions 
-    WHERE user_id = ? 
+    WHERE user_id = :uid 
     ORDER BY created_at DESC 
     LIMIT 20
 ";
-$stmt_tx = mysqli_prepare($conn, $tx_query);
-mysqli_stmt_bind_param($stmt_tx, "i", $user_id);
-mysqli_stmt_execute($stmt_tx);
-$tx_res = mysqli_stmt_get_result($stmt_tx);
 $transactions = [];
-while ($tx = mysqli_fetch_assoc($tx_res)) {
-    $transactions[] = $tx;
-}
-mysqli_stmt_close($stmt_tx);
+try {
+    $stmt_tx = $pdo->prepare($tx_query);
+    $stmt_tx->execute([':uid' => $user_id]);
+    $transactions = $stmt_tx->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (\Throwable $e) {}
 
 // 8. Fetch Notification Preferences
-$stmt_np = mysqli_prepare($conn, "SELECT * FROM user_notifications WHERE user_id = ? LIMIT 1");
-mysqli_stmt_bind_param($stmt_np, "i", $user_id);
-mysqli_stmt_execute($stmt_np);
-$notif_prefs = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt_np)) ?: [
-    'email_bids' => 1,
-    'email_outbid' => 1,
-    'email_won' => 1,
+$notif_prefs = [
+    'email_bids'       => 1,
+    'email_outbid'     => 1,
+    'email_won'        => 1,
     'email_newsletter' => 0,
-    'sms_bids' => 0
+    'sms_bids'         => 0
 ];
-mysqli_stmt_close($stmt_np);
+try {
+    $stmt_np = $pdo->prepare("SELECT * FROM user_notifications WHERE user_id = :uid LIMIT 1");
+    $stmt_np->execute([':uid' => $user_id]);
+    $np_data = $stmt_np->fetch(PDO::FETCH_ASSOC);
+    if ($np_data) {
+        $notif_prefs = $np_data;
+    }
+} catch (\Throwable $e) {}
 
 include_once __DIR__ . '/../includes/header.php';
 ?>
@@ -501,9 +529,9 @@ include_once __DIR__ . '/../includes/header.php';
                 </div>
                 <div>
                     <div class="flex items-center gap-3 flex-wrap">
-                        <h1 class="text-2xl sm:text-3xl font-black tracking-tight"><?php echo htmlspecialchars($user['name']); ?></h1>
+                        <h1 class="text-2xl sm:text-3xl font-black tracking-tight"><?php echo htmlspecialchars((string)($user['name'] ?? '')); ?></h1>
                         <?php if (!empty($username)): ?>
-                            <span class="text-xs px-2.5 py-0.5 rounded-full bg-white/15 text-emerald-200 font-mono">@<?php echo htmlspecialchars($username); ?></span>
+                            <span class="text-xs px-2.5 py-0.5 rounded-full bg-white/15 text-emerald-200 font-mono">@<?php echo htmlspecialchars((string)$username); ?></span>
                         <?php endif; ?>
                         
                         <!-- Dynamic Trust Tier Badge -->
@@ -521,9 +549,9 @@ include_once __DIR__ . '/../includes/header.php';
                             </span>
                         <?php endif; ?>
                     </div>
-                    <p class="text-emerald-200/80 text-sm mt-0.5"><?php echo htmlspecialchars($user['email']); ?></p>
+                    <p class="text-emerald-200/80 text-sm mt-0.5"><?php echo htmlspecialchars((string)($user['email'] ?? '')); ?></p>
                     <div class="flex items-center gap-4 mt-2 text-xs text-white/70 flex-wrap">
-                        <span><i class="fa-solid fa-user-tag text-emerald-400 mr-1"></i> Role: <strong><?php echo ucfirst(htmlspecialchars($user['role'])); ?></strong></span>
+                        <span><i class="fa-solid fa-user-tag text-emerald-400 mr-1"></i> Role: <strong><?php echo ucfirst(htmlspecialchars((string)($user['role'] ?? 'user'))); ?></strong></span>
                         <span><i class="fa-solid fa-calendar-check text-emerald-400 mr-1"></i> Member Since: <strong><?php echo date('M Y', strtotime($user['created_at'])); ?></strong></span>
                         <?php if (!empty($kyc_verified_at)): ?>
                             <span><i class="fa-solid fa-circle-check text-emerald-400 mr-1"></i> KYC Certified: <strong><?php echo date('M d, Y', strtotime($kyc_verified_at)); ?></strong></span>
@@ -682,6 +710,18 @@ include_once __DIR__ . '/../includes/header.php';
                     <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Primary Shipping & Delivery Address</label>
                     <textarea name="shipping_address" rows="3" placeholder="Apartment, Street Address, City, Postal Code..."
                               class="w-full px-4 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none transition"><?php echo htmlspecialchars($shipping_address); ?></textarea>
+                </div>
+
+                <!-- Designation / Professional Title -->
+                <div class="mb-6">
+                    <label class="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                        Professional Title / Role Badge
+                    </label>
+                    <input type="text" name="designation" 
+                           value="<?php echo htmlspecialchars($user['designation'] ?? 'Junior Software Engineer'); ?>" 
+                           placeholder="e.g. Junior Software Engineer, Lead Developer, Collector"
+                           class="w-full px-4 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none transition">
+                    <span class="text-[11px] text-slate-400 mt-1 block">Displayed on your dashboard header banner badge.</span>
                 </div>
 
                 <!-- Bio -->

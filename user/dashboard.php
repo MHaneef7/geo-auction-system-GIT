@@ -98,6 +98,7 @@ declare(strict_types=1);
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
+date_default_timezone_set('Asia/Karachi');
 
 // -----------------------------------------------------------------------------
 // 1. Database Connection & Helper Functions
@@ -106,8 +107,31 @@ require_once __DIR__ . '/../includes/database.php';
 
 try {
     $pdo = Database::getPdo();
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS `orders` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `order_number` VARCHAR(50) NOT NULL UNIQUE,
+            `auction_id` INT NOT NULL,
+            `buyer_id` INT NOT NULL,
+            `seller_id` INT NOT NULL,
+            `hammer_price` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            `platform_fee` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            `shipping_fee` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            `total_amount` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+            `payment_status` VARCHAR(30) NOT NULL DEFAULT 'PAYMENT_PENDING',
+            `shipping_status` VARCHAR(30) NOT NULL DEFAULT 'PROCESSING',
+            `delivery_confirmed_at` DATETIME NULL DEFAULT NULL,
+            `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+            `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX (`auction_id`),
+            INDEX (`buyer_id`),
+            INDEX (`seller_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
 } catch (\Throwable $e) {
-    die("Database Connection Error: " . htmlspecialchars($e->getMessage()));
+    if (!isset($pdo) || !$pdo) {
+        die("Database Connection Error: " . htmlspecialchars($e->getMessage()));
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -135,7 +159,47 @@ if (isset($_GET['switch_role']) && in_array(strtolower($_GET['switch_role']), ['
 
 $user_id   = (int)$_SESSION['user_id'];
 $user_role = strtolower(trim($_SESSION['role'] ?? $_SESSION['user_role'] ?? 'buyer'));
-$user_name = $_SESSION['user_name'] ?? ($_SESSION['name'] ?? 'Auctioneer');
+$user_name = $_SESSION['user_name'] ?? ($_SESSION['name'] ?? 'Haneef Memon');
+
+// Fetch user profile info (name, avatar, bio, designation, balance)
+$user_avatar      = '';
+$user_designation = 'Junior Software Engineer';
+$user_bio         = '';
+try {
+    $stmt_u = $pdo->prepare("SELECT name, username, email, role, avatar, bio, designation, balance FROM users WHERE id = :uid LIMIT 1");
+    $stmt_u->execute([':uid' => $user_id]);
+    $u_data = $stmt_u->fetch(PDO::FETCH_ASSOC);
+    if ($u_data) {
+        if (!empty($u_data['name'])) {
+            $user_name = $u_data['name'];
+        }
+        $user_avatar      = $u_data['avatar'] ?? '';
+        $user_bio         = $u_data['bio'] ?? '';
+        $user_designation = !empty($u_data['designation']) 
+            ? $u_data['designation'] 
+            : (!empty($u_data['bio']) ? $u_data['bio'] : 'Junior Software Engineer');
+    }
+} catch (\Throwable $e) {}
+
+// Helper for user avatar image
+if (!function_exists('get_dash_user_avatar')) {
+    function get_dash_user_avatar(?string $avatar, string $userName = 'Haneef Memon'): string {
+        if (!empty($avatar)) {
+            $avatar = trim($avatar);
+            if (preg_match('/^(https?:\/\/|\/\/|data:)/i', $avatar)) {
+                return $avatar;
+            }
+            $clean = ltrim($avatar, '/\\');
+            if (file_exists(__DIR__ . '/../' . $clean)) {
+                return '../' . $clean;
+            }
+        }
+        if (file_exists(__DIR__ . '/../assets/image/haneef_avatar.png')) {
+            return '../assets/image/haneef_avatar.png';
+        }
+        return 'https://ui-avatars.com/api/?name=' . urlencode($userName) . '&background=047857&color=fff&size=180&bold=true';
+    }
+}
 
 // Generate CSRF Token
 if (empty($_SESSION['csrf_token'])) {
@@ -589,14 +653,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
                 $ord_no = 'ORD-' . strtoupper(substr(uniqid(), -8));
                 $ins_ord = $pdo->prepare("
                     INSERT INTO orders (order_number, auction_id, buyer_id, seller_id, hammer_price, platform_fee, shipping_fee, total_amount, payment_status, shipping_status, created_at)
-                    VALUES (:ord_no, :aid, :bid, :sid, :hammer, 0.00, 0.00, :hammer, 'PAID', 'PROCESSING', NOW())
+                    VALUES (:ord_no, :aid, :bid, :sid, :hammer, 0.00, 0.00, :total_amt, 'PAID', 'PROCESSING', NOW())
                 ");
                 $ins_ord->execute([
-                    ':ord_no' => $ord_no,
-                    ':aid'    => $won_item_id,
-                    ':bid'    => $user_id,
-                    ':sid'    => $wonItem['seller_id'],
-                    ':hammer' => $hammer_price,
+                    ':ord_no'    => $ord_no,
+                    ':aid'       => $won_item_id,
+                    ':bid'       => $user_id,
+                    ':sid'       => $wonItem['seller_id'],
+                    ':hammer'    => $hammer_price,
+                    ':total_amt' => $hammer_price,
                 ]);
             }
 
@@ -805,19 +870,113 @@ $stmt = $pdo->prepare("
 $stmt->execute([':uid' => $user_id]);
 $notifications_list = $stmt->fetchAll();
 
-// Section 5: "Explore Trending Live Auctions"
-$stmt = $pdo->prepare("
-    SELECT i.id, i.auction_code, i.title, i.featured_image, i.current_price, i.starting_price, i.min_increment, i.end_time, i.bid_count, c.name as category_name
+// Section 5: "Explore Trending Live Auctions" - Filter-Aware & High-Precision Query
+$filter_category  = isset($_GET['category_id']) && is_numeric($_GET['category_id']) ? (int)$_GET['category_id'] : 0;
+$filter_search    = trim($_GET['search'] ?? '');
+$filter_min_price = isset($_GET['min_price']) && is_numeric($_GET['min_price']) ? (float)$_GET['min_price'] : 0;
+$filter_max_price = isset($_GET['max_price']) && is_numeric($_GET['max_price']) ? (float)$_GET['max_price'] : 0;
+$filter_condition = trim($_GET['condition'] ?? '');
+$filter_location  = trim($_GET['location'] ?? '');
+$filter_sort      = trim($_GET['sort'] ?? 'newest');
+$filter_radius    = isset($_GET['radius']) && is_numeric($_GET['radius']) ? (float)$_GET['radius'] : 0;
+
+// Auto-switch to explore tab if user submitted filters
+$is_filter_active = ($filter_category > 0 || $filter_search !== '' || $filter_min_price > 0 || $filter_max_price > 0 || $filter_condition !== '' || $filter_location !== '' || (isset($_GET['tab']) && $_GET['tab'] === 'explore'));
+$active_dashboard_tab = $is_filter_active ? 'exploreTab' : 'activeBidsTab';
+
+try {
+    $categories_list = $pdo->query("SELECT id, name FROM categories ORDER BY name ASC")->fetchAll();
+} catch (\Throwable $e) {
+    $categories_list = [];
+}
+
+$exp_where = ["(i.is_deleted = 0 OR i.is_deleted IS NULL)"];
+$exp_where[] = "(i.status = 'active' OR i.status IS NULL OR i.status = '')";
+$exp_where[] = "(i.end_time IS NULL OR i.end_time > NOW())";
+$exp_params = [];
+
+if ($filter_category > 0) {
+    $exp_where[] = "i.category_id = :cat_id";
+    $exp_params[':cat_id'] = $filter_category;
+}
+if ($filter_search !== '') {
+    $exp_where[] = "(i.title LIKE :q1 OR i.auction_code LIKE :q2 OR i.description LIKE :q3)";
+    $q_val = '%' . $filter_search . '%';
+    $exp_params[':q1'] = $q_val;
+    $exp_params[':q2'] = $q_val;
+    $exp_params[':q3'] = $q_val;
+}
+if ($filter_min_price > 0) {
+    $exp_where[] = "i.current_price >= :min_p";
+    $exp_params[':min_p'] = $filter_min_price;
+}
+if ($filter_max_price > 0) {
+    $exp_where[] = "i.current_price <= :max_p";
+    $exp_params[':max_p'] = $filter_max_price;
+}
+if ($filter_condition !== '') {
+    $exp_where[] = "i.condition_type = :cond";
+    $exp_params[':cond'] = $filter_condition;
+}
+if ($filter_location !== '') {
+    $exp_where[] = "(i.city LIKE :loc1 OR i.location_city LIKE :loc2 OR i.location_state LIKE :loc3 OR i.area LIKE :loc4 OR i.location_address LIKE :loc5)";
+    $loc_val = '%' . $filter_location . '%';
+    $exp_params[':loc1'] = $loc_val;
+    $exp_params[':loc2'] = $loc_val;
+    $exp_params[':loc3'] = $loc_val;
+    $exp_params[':loc4'] = $loc_val;
+    $exp_params[':loc5'] = $loc_val;
+}
+
+$exp_order = "i.end_time ASC";
+if ($filter_sort === 'price_low') {
+    $exp_order = "i.current_price ASC";
+} elseif ($filter_sort === 'price_high') {
+    $exp_order = "i.current_price DESC";
+} elseif ($filter_sort === 'popular') {
+    $exp_order = "i.bid_count DESC, i.watcher_count DESC";
+} elseif ($filter_sort === 'newest') {
+    $exp_order = "i.id DESC";
+} elseif ($filter_sort === 'ending_soon') {
+    $exp_order = "i.end_time ASC";
+}
+
+$exp_sql = "
+    SELECT 
+        i.id, i.auction_code, i.title, i.featured_image, i.images, i.current_price, i.starting_price, 
+        i.min_increment, i.end_time, i.bid_count, i.watcher_count, i.views, i.condition_type, 
+        i.city, i.area, i.location_city, i.location_state, i.location_lat, i.location_lng,
+        c.name as category_name, c.id as category_id,
+        u.name as seller_name, u.avatar as seller_avatar
     FROM items i
     LEFT JOIN categories c ON i.category_id = c.id
-    WHERE i.status = 'active' 
-      AND i.end_time > NOW() 
-      AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
-    ORDER BY i.end_time ASC
-    LIMIT 6
-");
-$stmt->execute();
+    LEFT JOIN users u ON i.seller_id = u.id
+    WHERE " . implode(' AND ', $exp_where) . "
+    ORDER BY $exp_order
+    LIMIT 12
+";
+$stmt = $pdo->prepare($exp_sql);
+$stmt->execute($exp_params);
 $explore_auctions = $stmt->fetchAll();
+
+// Fallback to recent lots if few active items matched filters or during testing
+if (empty($explore_auctions) && empty($filter_search) && $filter_category === 0) {
+    $fallback_stmt = $pdo->query("
+        SELECT 
+            i.id, i.auction_code, i.title, i.featured_image, i.images, i.current_price, i.starting_price, 
+            i.min_increment, i.end_time, i.bid_count, i.watcher_count, i.views, i.condition_type, 
+            i.city, i.area, i.location_city, i.location_state, i.location_lat, i.location_lng,
+            c.name as category_name, c.id as category_id,
+            u.name as seller_name, u.avatar as seller_avatar
+        FROM items i
+        LEFT JOIN categories c ON i.category_id = c.id
+        LEFT JOIN users u ON i.seller_id = u.id
+        WHERE (i.is_deleted = 0 OR i.is_deleted IS NULL)
+        ORDER BY i.id DESC
+        LIMIT 9
+    ");
+    $explore_auctions = $fallback_stmt->fetchAll();
+}
 
 // Consume flash notifications
 $flash_success = $_SESSION['flash_success'] ?? '';
@@ -826,6 +985,19 @@ unset($_SESSION['flash_success'], $_SESSION['flash_error']);
 
 // Include Global Site Header
 include_once __DIR__ . '/../includes/header.php';
+
+// Re-assert database-backed profile values after header inclusion
+if (!empty($u_data['name'])) {
+    $user_name = $u_data['name'];
+}
+if (!empty($u_data['avatar'])) {
+    $user_avatar = $u_data['avatar'];
+}
+if (!empty($u_data['designation'])) {
+    $user_designation = $u_data['designation'];
+} elseif (!empty($u_data['bio'])) {
+    $user_designation = $u_data['bio'];
+}
 ?>
 
 <!-- Bootstrap 5 CSS & Font Awesome 6 Icons -->
@@ -833,6 +1005,9 @@ include_once __DIR__ . '/../includes/header.php';
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 <!-- Chart.js v4 for Dynamic Bidding Analytics -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+<!-- Leaflet Interactive Map CDN -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <!-- Dashboard Custom Design System & Dynamic Aesthetics -->
 <style>
@@ -868,27 +1043,171 @@ html.dark-theme {
     color: var(--dash-text);
 }
 
-/* Banner Header */
+/* ── Enhanced Hero Profile Banner (Matches Exact UI Layout) ── */
 .dash-banner {
-    background: linear-gradient(135deg, #047857 0%, #064e3b 100%);
+    background: #02251f url('../assets/image/dashboard_banner_bg.jpg') center/cover no-repeat;
     color: #ffffff;
-    border-radius: var(--dash-radius);
-    padding: 28px 32px;
+    border-radius: 18px;
+    padding: 22px 30px;
     margin-bottom: 28px;
-    box-shadow: 0 10px 25px -5px rgba(4, 120, 87, 0.35);
+    box-shadow: 0 12px 32px -5px rgba(2, 44, 34, 0.55);
+    border: 1px solid rgba(16, 185, 129, 0.28);
     position: relative;
     overflow: hidden;
 }
-.dash-banner::after {
+.dash-banner::before {
     content: '';
     position: absolute;
-    right: -40px;
-    bottom: -40px;
-    width: 200px;
-    height: 200px;
-    background: radial-gradient(circle, rgba(255,255,255,0.15) 0%, rgba(255,255,255,0) 70%);
-    border-radius: 50%;
+    inset: 0;
+    background: linear-gradient(90deg, rgba(2, 37, 31, 0.88) 0%, rgba(2, 37, 31, 0.45) 50%, rgba(2, 37, 31, 0.82) 100%);
     pointer-events: none;
+    z-index: 1;
+}
+.dash-banner-content {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 20px;
+}
+.dash-user-profile {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+.dash-user-avatar-wrap {
+    position: relative;
+    width: 90px;
+    height: 90px;
+    flex-shrink: 0;
+}
+.dash-user-avatar {
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    border: 3.5px solid #ffffff;
+    object-fit: cover;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+    display: block;
+    background: #064e3b;
+}
+.dash-user-details {
+    display: flex;
+    flex-direction: column;
+}
+.dash-user-name {
+    font-size: 1.7rem;
+    font-weight: 700;
+    color: #ffffff;
+    letter-spacing: -0.3px;
+    line-height: 1.2;
+    margin: 0 0 4px 0;
+}
+.dash-user-badge {
+    background: #832742;
+    color: #ffffff;
+    padding: 3px 12px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    display: inline-block;
+    width: fit-content;
+    margin-bottom: 6px;
+    letter-spacing: 0.2px;
+    border: 1px solid rgba(254, 205, 211, 0.2);
+    box-shadow: 0 2px 6px rgba(131, 39, 66, 0.3);
+}
+.dash-user-links {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.dash-banner-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 12.5px;
+    font-weight: 500;
+    text-decoration: none;
+    transition: all 0.2s ease;
+}
+.dash-banner-link:hover {
+    color: #34d399;
+    transform: translateX(2px);
+}
+.dash-banner-link i {
+    font-size: 12px;
+    opacity: 0.85;
+}
+
+/* Clock Circular Widget */
+.dash-clock-widget {
+    width: 92px;
+    height: 92px;
+    border-radius: 50%;
+    background: #000000;
+    border: 2.5px solid #ffffff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+.dash-clock-widget::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 30% 30%, rgba(56, 189, 248, 0.22) 0%, transparent 65%);
+    pointer-events: none;
+}
+.dash-clock-time {
+    font-size: 18px;
+    font-weight: 800;
+    color: #ffffff;
+    line-height: 1;
+    letter-spacing: 0.5px;
+    font-family: 'Inter', system-ui, sans-serif;
+    position: relative;
+    z-index: 2;
+}
+.dash-clock-date {
+    font-size: 9.5px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.85);
+    margin-top: 4px;
+    text-transform: capitalize;
+    text-align: center;
+    position: relative;
+    z-index: 2;
+    white-space: nowrap;
+}
+
+/* Dashboard Action Buttons Toolbar */
+.dash-banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+@media (max-width: 768px) {
+    .dash-banner {
+        padding: 20px;
+    }
+    .dash-banner-content {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    .dash-clock-widget {
+        align-self: flex-end;
+        margin-top: -50px;
+    }
 }
 
 /* KPI / Metric Cards */
@@ -931,6 +1250,189 @@ html.dark-theme {
     color: var(--dash-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+}
+
+/* ── Location & Area Map Card Widget ── */
+.location-area-card {
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: var(--dash-radius, 16px);
+    padding: 18px 20px;
+    box-shadow: var(--dash-shadow);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+    overflow: hidden;
+    height: 100%;
+}
+.location-area-card:hover {
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.08);
+}
+.location-area-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+.location-area-title {
+    font-size: 1.12rem;
+    font-weight: 700;
+    color: var(--dash-text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    letter-spacing: -0.2px;
+}
+.location-map-wrapper {
+    position: relative;
+    width: 100%;
+    min-height: 250px;
+    flex: 1 1 auto;
+    border-radius: 14px;
+    overflow: hidden;
+    border: 1px solid var(--dash-border);
+    background: #0f172a;
+    box-shadow: inset 0 2px 6px rgba(0,0,0,0.15);
+}
+#dashboardLocationMap {
+    width: 100%;
+    height: 100%;
+    min-height: 250px;
+    z-index: 1;
+}
+
+/* Floating Navigation Controls Cluster */
+.map-nav-cluster {
+    position: absolute;
+    right: 12px;
+    bottom: 26px;
+    z-index: 500;
+    display: grid;
+    grid-template-columns: repeat(4, 38px);
+    grid-template-rows: repeat(3, 38px);
+    gap: 6px;
+    align-items: center;
+    justify-items: center;
+    pointer-events: none;
+}
+.map-nav-cluster .map-ctrl-btn {
+    pointer-events: auto;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: #ffffff;
+    color: #334155;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    padding: 0;
+    outline: none;
+    user-select: none;
+}
+.map-nav-cluster .map-ctrl-btn:hover {
+    background: #f8fafc;
+    color: #047857;
+    transform: scale(1.1);
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.32);
+}
+.map-nav-cluster .map-ctrl-btn:active {
+    transform: scale(0.92);
+}
+
+/* Cluster Button Positions */
+#mapPanLeft    { grid-column: 1; grid-row: 2; }
+#mapPanUp      { grid-column: 2; grid-row: 1; }
+#mapPanDown    { grid-column: 2; grid-row: 3; }
+#mapZoomIn     { grid-column: 3; grid-row: 1; }
+#mapPanRight   { grid-column: 3; grid-row: 2; }
+#mapZoomOut    { grid-column: 3; grid-row: 3; }
+#mapRecenter   { grid-column: 4; grid-row: 3; }
+
+/* Map Style Switcher (Thumbnail at bottom left) */
+.map-style-toggle-thumb {
+    position: absolute;
+    left: 10px;
+    bottom: 24px;
+    z-index: 500;
+    width: 44px;
+    height: 44px;
+    border-radius: 8px;
+    border: 2px solid #ffffff;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+    overflow: hidden;
+    background-size: cover;
+    background-position: center;
+    transition: all 0.2s ease;
+    background-color: #cbd5e1;
+    background-image: url('https://mt1.google.com/vt/lyrs=m&x=47352&y=27988&z=16');
+}
+.map-style-toggle-thumb:hover {
+    transform: scale(1.08);
+    border-color: #10b981;
+}
+
+/* Google attribution bottom bar */
+.map-google-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 400;
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(4px);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 2px 8px;
+    font-size: 9.5px;
+    color: #475569;
+    user-select: none;
+    pointer-events: none;
+    line-height: 1.2;
+}
+.map-google-bar a {
+    color: #475569;
+    text-decoration: none;
+    pointer-events: auto;
+    margin: 0 2px;
+}
+.map-google-bar a:hover {
+    text-decoration: underline;
+}
+
+/* Card Footer */
+.location-area-footer {
+    padding-top: 10px;
+    text-align: center;
+}
+.location-name-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14.5px;
+    font-weight: 600;
+    color: #334155;
+    text-decoration: none;
+    padding: 5px 14px;
+    border-radius: 20px;
+    background: transparent;
+    border: 1px solid transparent;
+    transition: all 0.2s ease;
+    cursor: pointer;
+}
+.location-name-pill:hover {
+    color: var(--dash-primary);
+    background: var(--dash-primary-light);
+    border-color: rgba(4, 120, 87, 0.15);
 }
 
 /* Navigation Tabs */
@@ -1164,6 +1666,577 @@ html.dark-theme {
 html.dark-theme .analytics-loader-overlay {
     background: rgba(15, 23, 42, 0.75);
 }
+
+/* ==========================================================================
+   GEO AUCTION LIVE CARDS & FILTERS DESIGN SYSTEM (Matching User Design)
+   ========================================================================== */
+.geo-live-container {
+    margin-bottom: 30px;
+}
+
+/* 1. Hero Banner */
+.geo-live-hero-banner {
+    background: linear-gradient(135deg, #022c22 0%, #047857 55%, #064e3b 100%);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+    border-radius: 16px;
+    padding: 24px 28px;
+    color: #ffffff;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+    box-shadow: 0 10px 25px -5px rgba(4, 120, 87, 0.3);
+    position: relative;
+    overflow: hidden;
+}
+.geo-live-hero-banner::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 320px;
+    background: radial-gradient(circle at right center, rgba(16, 185, 129, 0.25), transparent 70%);
+    pointer-events: none;
+}
+.geo-hero-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    z-index: 1;
+}
+.geo-hero-gavel {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: #d97706;
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    box-shadow: 0 4px 14px rgba(217, 119, 6, 0.4);
+    flex-shrink: 0;
+}
+.geo-hero-title {
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    margin: 0 0 2px 0;
+    color: #ffffff;
+    line-height: 1.2;
+}
+.geo-hero-sub {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.78);
+    margin: 0;
+    font-weight: 500;
+}
+.geo-hero-right {
+    z-index: 1;
+}
+.geo-live-pill {
+    background: rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    color: #ffffff;
+    padding: 7px 16px;
+    border-radius: 30px;
+    font-size: 13px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    letter-spacing: 0.3px;
+}
+.geo-pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #10b981;
+    display: inline-block;
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+    animation: geoPulse 1.8s infinite;
+}
+@keyframes geoPulse {
+    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+    70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+/* 2. Horizontal Filters Bar */
+.geo-top-filters-bar {
+    background: var(--dash-surface);
+    border: 1px solid var(--dash-border);
+    border-radius: 16px;
+    padding: 12px 16px;
+    margin-bottom: 24px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+}
+.geo-filters-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.geo-pill-box {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 7px 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #475569;
+    flex: 1 1 130px;
+    min-width: 120px;
+    transition: all 0.2s ease;
+}
+.geo-pill-box:focus-within,
+.geo-pill-box:hover {
+    border-color: #047857;
+    box-shadow: 0 0 0 3px rgba(4, 120, 87, 0.08);
+}
+.geo-pill-box i {
+    color: #94a3b8;
+    font-size: 13px;
+}
+.geo-pill-box select,
+.geo-pill-box input {
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 13px;
+    color: #0f172a;
+    width: 100%;
+    padding: 0;
+}
+.geo-pill-box input::placeholder {
+    color: #94a3b8;
+}
+.geo-btn-apply-filters {
+    background: #047857;
+    color: #ffffff;
+    border: none;
+    border-radius: 10px;
+    padding: 9px 20px;
+    font-size: 13px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+.geo-btn-apply-filters:hover {
+    background: #065f46;
+    color: #ffffff;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(4, 120, 87, 0.25);
+}
+
+/* 3. Main Two-Column Layout (Cards on Left + Sidebar on Right) */
+.geo-live-layout-wrap {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    gap: 24px;
+    align-items: start;
+}
+@media (max-width: 1080px) {
+    .geo-live-layout-wrap {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Cards Grid */
+.geo-auction-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 20px;
+}
+@media (max-width: 1200px) {
+    .geo-auction-cards-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+@media (max-width: 640px) {
+    .geo-auction-cards-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Single Card Component (Exact Match to User UI) */
+.geo-style-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease, border-color 0.25s ease;
+    display: flex;
+    flex-direction: column;
+}
+.geo-style-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 16px 32px rgba(4, 120, 87, 0.12);
+    border-color: rgba(4, 120, 87, 0.35);
+}
+
+/* Card Image & Overlay Badges */
+.geo-card-thumb-wrap {
+    position: relative;
+    width: 100%;
+    height: 195px;
+    overflow: hidden;
+    background: #0f172a;
+}
+.geo-card-thumb-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.4s ease;
+}
+.geo-style-card:hover .geo-card-thumb-wrap img {
+    transform: scale(1.04);
+}
+
+/* Top-Left: LIVE stream badge */
+.geo-badge-live-stream {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 2;
+    background: #dc2626;
+    color: #ffffff;
+    font-size: 10.5px;
+    font-weight: 800;
+    padding: 3px 9px;
+    border-radius: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    letter-spacing: 0.5px;
+    box-shadow: 0 2px 8px rgba(220, 38, 38, 0.5);
+}
+.geo-badge-live-stream i {
+    font-size: 11px;
+}
+
+/* Pill Overlay Badges */
+.geo-badge-card-pill {
+    position: absolute;
+    z-index: 2;
+    background: rgba(15, 23, 42, 0.7);
+    backdrop-filter: blur(4px);
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3.5px 9px;
+    border-radius: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    line-height: 1;
+}
+.geo-badge-card-pill.top-right {
+    top: 10px;
+    right: 10px;
+}
+.geo-badge-card-pill.bottom-left {
+    bottom: 10px;
+    left: 10px;
+}
+.geo-badge-card-pill.bottom-right {
+    bottom: 10px;
+    right: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 700;
+    background: rgba(15, 23, 42, 0.8);
+    letter-spacing: 0.3px;
+}
+
+/* Card Body Content */
+.geo-card-body {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    flex-grow: 1;
+}
+.geo-card-title {
+    font-size: 15px;
+    font-weight: 800;
+    color: #0f172a;
+    margin: 0 0 3px 0;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.geo-card-title a {
+    color: inherit;
+    text-decoration: none;
+    transition: color 0.15s ease;
+}
+.geo-card-title a:hover {
+    color: #047857;
+}
+.geo-card-location {
+    font-size: 12px;
+    color: #64748b;
+    margin-bottom: 11px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+.geo-card-location i {
+    font-size: 11px;
+    color: #94a3b8;
+}
+
+/* Price Row */
+.geo-card-price-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 9px;
+}
+.geo-card-price {
+    font-size: 15.5px;
+    font-weight: 900;
+    color: #047857;
+    letter-spacing: -0.3px;
+}
+.geo-badge-current-bid {
+    background: #ecfdf5;
+    color: #047857;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2.5px 7px;
+    border-radius: 12px;
+    border: 1px solid rgba(4, 120, 87, 0.18);
+    letter-spacing: 0.2px;
+}
+
+/* Bids & Watchers Meta Row */
+.geo-card-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 11.5px;
+    color: #64748b;
+    font-weight: 600;
+    margin-bottom: 12px;
+}
+.geo-card-meta-row span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+.geo-card-meta-row i {
+    color: #94a3b8;
+}
+
+/* Footer / Seller & Place Bid */
+.geo-card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: auto;
+    padding-top: 11px;
+    border-top: 1px solid #f1f5f9;
+}
+.geo-seller-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.geo-seller-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid #e2e8f0;
+    flex-shrink: 0;
+}
+.geo-seller-meta {
+    min-width: 0;
+    line-height: 1.2;
+}
+.geo-seller-name {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #0f172a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.geo-seller-status {
+    font-size: 9.5px;
+    color: #64748b;
+    display: block;
+}
+.btn-geo-place-bid {
+    background: #047857;
+    color: #ffffff !important;
+    border: none;
+    border-radius: 8px;
+    padding: 6.5px 12px;
+    font-size: 11.5px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    text-decoration: none;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: all 0.2s ease;
+}
+.btn-geo-place-bid:hover {
+    background: #065f46;
+    color: #ffffff;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(4, 120, 87, 0.25);
+}
+
+/* 4. Right Sidebar Filters & Near Me */
+.geo-sidebar-filters-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
+    margin-bottom: 20px;
+}
+.geo-sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #f1f5f9;
+}
+.geo-sidebar-header h4 {
+    font-size: 15px;
+    font-weight: 800;
+    margin: 0;
+    color: #0f172a;
+}
+.geo-sidebar-header a {
+    color: #94a3b8;
+    text-decoration: none;
+    font-size: 14px;
+    transition: color 0.15s;
+}
+.geo-sidebar-header a:hover {
+    color: #0f172a;
+}
+.geo-sidebar-group {
+    margin-bottom: 14px;
+}
+.geo-sidebar-group label {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #475569;
+    margin-bottom: 6px;
+    display: block;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.geo-sidebar-select,
+.geo-sidebar-input {
+    width: 100%;
+    border: 1px solid #e2e8f0;
+    border-radius: 9px;
+    padding: 7px 11px;
+    font-size: 12.5px;
+    color: #0f172a;
+    background: #ffffff;
+    outline: none;
+    transition: border-color 0.15s;
+}
+.geo-sidebar-select:focus,
+.geo-sidebar-input:focus {
+    border-color: #047857;
+}
+.geo-price-range-inputs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+.geo-btn-sidebar-apply {
+    background: #047857;
+    color: #ffffff;
+    border: none;
+    border-radius: 9px;
+    padding: 9px;
+    width: 100%;
+    font-size: 12.5px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: background 0.2s;
+    margin-top: 14px;
+}
+.geo-btn-sidebar-apply:hover {
+    background: #065f46;
+}
+
+/* Near Me Distance Radius */
+.geo-near-me-box {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid #f1f5f9;
+}
+.geo-near-me-title {
+    font-size: 12px;
+    font-weight: 800;
+    color: #0f172a;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.geo-near-me-title i {
+    color: #047857;
+}
+.geo-radius-pills-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+}
+.geo-radius-pill-btn {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 6px 4px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #475569;
+    text-align: center;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.15s ease;
+    display: block;
+}
+.geo-radius-pill-btn:hover,
+.geo-radius-pill-btn.active {
+    background: #ecfdf5;
+    border-color: #047857;
+    color: #047857;
+}
 </style>
 
 <div class="dashboard-wrapper">
@@ -1185,153 +2258,248 @@ html.dark-theme .analytics-loader-overlay {
         </div>
     <?php endif; ?>
 
-    <!-- ── 1. Top Welcome Banner & User Overview ── -->
-    <div class="dash-banner d-flex justify-content-between align-items-center flex-wrap gap-3">
-        <div>
-            <div class="d-flex align-items-center gap-2 mb-2">
-                <span class="badge bg-white text-success fw-bold px-2 py-1 text-uppercase" style="font-size: 11px; letter-spacing: 0.5px;">
-                    <i class="fa-solid fa-shield-halved me-1"></i> <?= htmlspecialchars($user_role) ?> Portal
-                </span>
-                <span class="text-white-50 small">
-                    <i class="fa-regular fa-clock me-1"></i> Live: <span id="dashLiveClock"><?= date('D, M d, Y - h:i A') ?></span>
-                </span>
+    <!-- ── 1. Top Welcome Banner & User Overview (Custom Aesthetic Banner) ── -->
+    <div class="dash-banner mb-4">
+        <div class="dash-banner-content">
+            <!-- Left: User Avatar & Info -->
+            <div class="dash-user-profile">
+                <div class="dash-user-avatar-wrap">
+                    <img src="<?= htmlspecialchars(get_dash_user_avatar($user_avatar, $user_name)) ?>" 
+                         alt="<?= htmlspecialchars($user_name) ?>" 
+                         class="dash-user-avatar"
+                         onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=<?= urlencode($user_name) ?>&background=047857&color=fff&size=180&bold=true';">
+                </div>
+                <div class="dash-user-details">
+                    <h1 class="dash-user-name"><?= htmlspecialchars($user_name) ?></h1>
+                    <div class="dash-user-badge"><?= htmlspecialchars($user_designation) ?></div>
+                    <div class="dash-user-links">
+                        <a href="profile.php" class="dash-banner-link">
+                            <i class="fa-solid fa-circle-user"></i> <span>My Info</span>
+                        </a>
+                        <a href="settings.php" class="dash-banner-link">
+                            <i class="fa-solid fa-gear"></i> <span>Account Settings</span>
+                        </a>
+                    </div>
+                </div>
             </div>
-            <h1 class="h3 fw-bold mb-1">Welcome back, <?= htmlspecialchars($user_name) ?>!</h1>
-            <p class="mb-0 text-white-50 small">
-                Monitor your active bidding battles, analyze high vs low performance metrics, and settle won auction lots.
-            </p>
-        </div>
 
-        <div class="d-flex align-items-center gap-2 flex-wrap">
-            <button onclick="switchDashTab('analyticsTab')" class="btn btn-light fw-bold text-success px-3 py-2 shadow-sm" style="border-radius: 8px;">
-                <i class="fa-solid fa-chart-line me-1"></i> Visual Analytics
-            </button>
-            <?php if (in_array($user_role, ['seller', 'admin'], true)): ?>
-                <a href="add_items.php" class="btn btn-outline-light fw-bold px-3 py-2" style="border-radius: 8px;">
-                    <i class="fa-solid fa-plus-circle me-1"></i> List New Item
-                </a>
-            <?php endif; ?>
-            <a href="wallet.php" class="btn btn-outline-light fw-semibold px-3 py-2" style="border-radius: 8px;">
-                <i class="fa-solid fa-wallet me-1"></i> Wallet: Rs. <?= number_format($user_wallet_balance, 2) ?>
-            </a>
-            <!-- Quick Role Switcher for Developer Testing -->
-            <div class="dropdown">
-                <button class="btn btn-sm btn-outline-light dropdown-toggle px-2 py-2" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Preview role perspective">
-                    <i class="fa-solid fa-masks-theater"></i> View
-                </button>
-                <ul class="dropdown-menu dropdown-menu-end shadow">
-                    <li><h6 class="dropdown-header">Preview Dashboard As:</h6></li>
-                    <li><a class="dropdown-item <?= $user_role === 'buyer' ? 'active' : '' ?>" href="dashboard.php?switch_role=buyer"><i class="fa-solid fa-user me-2"></i> Buyer Mode</a></li>
-                    <li><a class="dropdown-item <?= $user_role === 'seller' ? 'active' : '' ?>" href="dashboard.php?switch_role=seller"><i class="fa-solid fa-store me-2"></i> Seller Mode</a></li>
-                    <li><a class="dropdown-item <?= $user_role === 'admin' ? 'active' : '' ?>" href="dashboard.php?switch_role=admin"><i class="fa-solid fa-user-shield me-2"></i> Admin Mode</a></li>
-                </ul>
+            <!-- Right Controls: Action Toolbar + Circular Clock Badge -->
+            <div class="d-flex align-items-center gap-3 flex-wrap">
+                <!-- Action Buttons Toolbar -->
+                <div class="dash-banner-actions">
+                    <button onclick="switchDashTab('analyticsTab')" class="btn btn-light btn-sm fw-bold text-success px-3 py-2 shadow-sm" style="border-radius: 8px;">
+                        <i class="fa-solid fa-chart-line me-1"></i> Visual Analytics
+                    </button>
+                    <?php if (in_array($user_role, ['seller', 'admin'], true)): ?>
+                        <a href="add_items.php" class="btn btn-outline-light btn-sm fw-bold px-3 py-2" style="border-radius: 8px;">
+                            <i class="fa-solid fa-plus-circle me-1"></i> List Item
+                        </a>
+                    <?php endif; ?>
+                    <a href="wallet.php" class="btn btn-outline-light btn-sm fw-semibold px-3 py-2" style="border-radius: 8px;">
+                        <i class="fa-solid fa-wallet me-1"></i> Rs. <?= number_format($user_wallet_balance, 2) ?>
+                    </a>
+                    <!-- Quick Role Switcher -->
+                    <div class="dropdown">
+                        <button class="btn btn-sm btn-outline-light dropdown-toggle px-2 py-2" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Preview role perspective">
+                            <i class="fa-solid fa-masks-theater"></i> View
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-end shadow">
+                            <li><h6 class="dropdown-header">Preview Dashboard As:</h6></li>
+                            <li><a class="dropdown-item <?= $user_role === 'buyer' ? 'active' : '' ?>" href="dashboard.php?switch_role=buyer"><i class="fa-solid fa-user me-2"></i> Buyer Mode</a></li>
+                            <li><a class="dropdown-item <?= $user_role === 'seller' ? 'active' : '' ?>" href="dashboard.php?switch_role=seller"><i class="fa-solid fa-store me-2"></i> Seller Mode</a></li>
+                            <?php if (!empty($u_data['role']) && strtolower($u_data['role']) === 'admin'): ?>
+                            <li><a class="dropdown-item <?= $user_role === 'admin' ? 'active' : '' ?>" href="dashboard.php?switch_role=admin"><i class="fa-solid fa-user-shield me-2"></i> Admin Mode</a></li>
+                            <?php endif; ?>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Circular Clock Widget (From User UI Spec) -->
+                <div class="dash-clock-widget" title="Current Local Time & Date">
+                    <div id="dashClockTime" class="dash-clock-time"><?= date('H:i') ?></div>
+                    <div id="dashClockDate" class="dash-clock-date"><?= date('D F d') ?></div>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- ── 2. Top Metric Cards (5 Key KPIs) ── -->
+    <!-- ── 2. Top Metric & Location Overview Row ── -->
     <div class="row g-3 mb-4">
-        <!-- Card 1: Total Active Bids -->
-        <div class="col-xl-custom col-lg-4 col-md-6 col-12" style="flex: 1 1 200px;">
-            <div class="kpi-card">
-                <div class="d-flex justify-content-between align-items-start mb-3">
-                    <div>
-                        <div class="kpi-label">Active Bids</div>
-                        <div class="kpi-val mt-1"><?= number_format($metric_active_bids) ?></div>
-                    </div>
-                    <div class="kpi-icon-badge" style="background: rgba(4, 120, 87, 0.12); color: #047857;">
-                        <i class="fa-solid fa-gavel"></i>
+        <!-- Left Column: KPI Metric Cards (5 Cards in 2 Rows) -->
+        <div class="col-xl-8 col-lg-7 col-12">
+            <div class="row g-3 h-100">
+                <!-- Card 1: Total Active Bids -->
+                <div class="col-md-4 col-sm-6 col-12">
+                    <div class="kpi-card">
+                        <div class="d-flex justify-content-between align-items-start mb-3">
+                            <div>
+                                <div class="kpi-label">Active Bids</div>
+                                <div class="kpi-val mt-1"><?= number_format($metric_active_bids) ?></div>
+                            </div>
+                            <div class="kpi-icon-badge" style="background: rgba(4, 120, 87, 0.12); color: #047857;">
+                                <i class="fa-solid fa-gavel"></i>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
+                            <span class="small text-muted">Ongoing auctions</span>
+                            <a href="#activeBidsTab" onclick="switchDashTab('activeBidsTab')" class="small text-success fw-bold text-decoration-none">
+                                View bids →
+                            </a>
+                        </div>
                     </div>
                 </div>
-                <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
-                    <span class="small text-muted">Ongoing auctions</span>
-                    <a href="#activeBidsTab" onclick="switchDashTab('activeBidsTab')" class="small text-success fw-bold text-decoration-none">
-                        View bids →
-                    </a>
+
+                <!-- Card 2: Auctions Won -->
+                <div class="col-md-4 col-sm-6 col-12">
+                    <div class="kpi-card">
+                        <div class="d-flex justify-content-between align-items-start mb-3">
+                            <div>
+                                <div class="kpi-label">Auctions Won</div>
+                                <div class="kpi-val mt-1"><?= number_format($metric_auctions_won) ?></div>
+                            </div>
+                            <div class="kpi-icon-badge" style="background: rgba(245, 158, 11, 0.15); color: #d97706;">
+                                <i class="fa-solid fa-trophy"></i>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
+                            <span class="small text-muted">Won lots</span>
+                            <a href="#wonAuctionsTab" onclick="switchDashTab('wonAuctionsTab')" class="small text-warning fw-bold text-decoration-none">
+                                Checkout →
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card 3: Total Spending / Tied-Up in Bids -->
+                <div class="col-md-4 col-sm-6 col-12">
+                    <div class="kpi-card">
+                        <div class="d-flex justify-content-between align-items-start mb-3">
+                            <div>
+                                <div class="kpi-label">Tied-Up in Bids</div>
+                                <div class="kpi-val mt-1" style="font-size: 22px;">Rs. <?= number_format($metric_tied_up_amount) ?></div>
+                            </div>
+                            <div class="kpi-icon-badge" style="background: rgba(59, 130, 246, 0.12); color: #2563eb;">
+                                <i class="fa-solid fa-lock"></i>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
+                            <span class="small text-muted">Wallet: Rs. <?= number_format($user_wallet_balance, 0) ?></span>
+                            <a href="wallet.php" class="small text-primary fw-bold text-decoration-none">
+                                Top up →
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card 4: Items Listed by User -->
+                <div class="col-md-6 col-sm-6 col-12">
+                    <div class="kpi-card">
+                        <div class="d-flex justify-content-between align-items-start mb-3">
+                            <div>
+                                <div class="kpi-label">My Listings</div>
+                                <div class="kpi-val mt-1"><?= number_format((int)$seller_metrics['total_listed']) ?></div>
+                            </div>
+                            <div class="kpi-icon-badge" style="background: rgba(139, 92, 246, 0.12); color: #7c3aed;">
+                                <i class="fa-solid fa-boxes-stacked"></i>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
+                            <span class="small text-muted"><?= $seller_metrics['active_listed'] ?> Live | <?= $seller_metrics['sold_listed'] ?> Sold</span>
+                            <a href="#myListingsTab" onclick="switchDashTab('myListingsTab')" class="small fw-bold text-decoration-none" style="color: #7c3aed;">
+                                Manage →
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card 5: Watchlist Items Count -->
+                <div class="col-md-6 col-sm-6 col-12">
+                    <div class="kpi-card">
+                        <div class="d-flex justify-content-between align-items-start mb-3">
+                            <div>
+                                <div class="kpi-label">Watchlist</div>
+                                <div class="kpi-val mt-1"><?= number_format($metric_watchlist_count) ?></div>
+                            </div>
+                            <div class="kpi-icon-badge" style="background: rgba(244, 63, 94, 0.12); color: #e11d48;">
+                                <i class="fa-solid fa-heart"></i>
+                            </div>
+                        </div>
+                        <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
+                            <span class="small text-muted">Saved favorites</span>
+                            <a href="wishlist.php" class="small text-danger fw-bold text-decoration-none">
+                                Saved items →
+                            </a>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
 
-        <!-- Card 2: Auctions Won -->
-        <div class="col-xl-custom col-lg-4 col-md-6 col-12" style="flex: 1 1 200px;">
-            <div class="kpi-card">
-                <div class="d-flex justify-content-between align-items-start mb-3">
-                    <div>
-                        <div class="kpi-label">Auctions Won</div>
-                        <div class="kpi-val mt-1"><?= number_format($metric_auctions_won) ?></div>
-                    </div>
-                    <div class="kpi-icon-badge" style="background: rgba(245, 158, 11, 0.15); color: #d97706;">
-                        <i class="fa-solid fa-trophy"></i>
+        <!-- Right Column: Location & Area Interactive Map Card -->
+        <div class="col-xl-4 col-lg-5 col-12">
+            <div class="location-area-card">
+                <!-- Header -->
+                <div class="location-area-header">
+                    <h5 class="location-area-title">
+                        <span class="map-icon">🗺️</span> Location & Area
+                    </h5>
+                    <div class="badge rounded-pill bg-success-subtle text-success border border-success-subtle px-2 py-1 small">
+                        <i class="fa-solid fa-satellite me-1"></i> Live Satellite
                     </div>
                 </div>
-                <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
-                    <span class="small text-muted">Won lots</span>
-                    <a href="#wonAuctionsTab" onclick="switchDashTab('wonAuctionsTab')" class="small text-warning fw-bold text-decoration-none">
-                        Checkout →
-                    </a>
-                </div>
-            </div>
-        </div>
 
-        <!-- Card 3: Total Spending / Tied-Up in Bids -->
-        <div class="col-xl-custom col-lg-4 col-md-6 col-12" style="flex: 1 1 200px;">
-            <div class="kpi-card">
-                <div class="d-flex justify-content-between align-items-start mb-3">
-                    <div>
-                        <div class="kpi-label">Tied-Up in Bids</div>
-                        <div class="kpi-val mt-1" style="font-size: 22px;">Rs. <?= number_format($metric_tied_up_amount) ?></div>
-                    </div>
-                    <div class="kpi-icon-badge" style="background: rgba(59, 130, 246, 0.12); color: #2563eb;">
-                        <i class="fa-solid fa-lock"></i>
-                    </div>
-                </div>
-                <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
-                    <span class="small text-muted">Wallet: Rs. <?= number_format($user_wallet_balance, 0) ?></span>
-                    <a href="wallet.php" class="small text-primary fw-bold text-decoration-none">
-                        Top up →
-                    </a>
-                </div>
-            </div>
-        </div>
+                <!-- Interactive Satellite Map Container -->
+                <div class="location-map-wrapper">
+                    <div id="dashboardLocationMap"></div>
 
-        <!-- Card 4: Items Listed by User -->
-        <div class="col-xl-custom col-lg-6 col-md-6 col-12" style="flex: 1 1 200px;">
-            <div class="kpi-card">
-                <div class="d-flex justify-content-between align-items-start mb-3">
-                    <div>
-                        <div class="kpi-label">My Listings</div>
-                        <div class="kpi-val mt-1"><?= number_format((int)$seller_metrics['total_listed']) ?></div>
+                    <!-- Circular Navigation Cluster (Pan, Zoom, Recenter) -->
+                    <div class="map-nav-cluster">
+                        <button type="button" class="map-ctrl-btn" id="mapPanLeft" title="Pan West"><i class="fa-solid fa-chevron-left"></i></button>
+                        <button type="button" class="map-ctrl-btn" id="mapPanUp" title="Pan North"><i class="fa-solid fa-chevron-up"></i></button>
+                        <button type="button" class="map-ctrl-btn" id="mapPanDown" title="Pan South"><i class="fa-solid fa-chevron-down"></i></button>
+                        <button type="button" class="map-ctrl-btn" id="mapZoomIn" title="Zoom In"><i class="fa-solid fa-plus"></i></button>
+                        <button type="button" class="map-ctrl-btn" id="mapPanRight" title="Pan East"><i class="fa-solid fa-chevron-right"></i></button>
+                        <button type="button" class="map-ctrl-btn" id="mapZoomOut" title="Zoom Out"><i class="fa-solid fa-minus"></i></button>
+                        <button type="button" class="map-ctrl-btn" id="mapRecenter" title="Recenter Location"><i class="fa-solid fa-expand"></i></button>
                     </div>
-                    <div class="kpi-icon-badge" style="background: rgba(139, 92, 246, 0.12); color: #7c3aed;">
-                        <i class="fa-solid fa-boxes-stacked"></i>
-                    </div>
-                </div>
-                <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
-                    <span class="small text-muted"><?= $seller_metrics['active_listed'] ?> Live | <?= $seller_metrics['sold_listed'] ?> Sold</span>
-                    <a href="#myListingsTab" onclick="switchDashTab('myListingsTab')" class="small fw-bold text-decoration-none" style="color: #7c3aed;">
-                        Manage →
-                    </a>
-                </div>
-            </div>
-        </div>
 
-        <!-- Card 5: Watchlist Items Count -->
-        <div class="col-xl-custom col-lg-6 col-md-6 col-12" style="flex: 1 1 200px;">
-            <div class="kpi-card">
-                <div class="d-flex justify-content-between align-items-start mb-3">
-                    <div>
-                        <div class="kpi-label">Watchlist</div>
-                        <div class="kpi-val mt-1"><?= number_format($metric_watchlist_count) ?></div>
-                    </div>
-                    <div class="kpi-icon-badge" style="background: rgba(244, 63, 94, 0.12); color: #e11d48;">
-                        <i class="fa-solid fa-heart"></i>
+                    <!-- Bottom-Left Map Style Switcher Thumbnail -->
+                    <div class="map-style-toggle-thumb" id="mapStyleToggleThumb" title="Toggle Satellite / Street View"></div>
+
+                    <!-- Google Attribution Watermark Bar -->
+                    <div class="map-google-bar">
+                        <div class="d-flex align-items-center">
+                            <span style="font-weight:700; font-family:'Roboto',sans-serif; letter-spacing:-0.3px;">
+                                <span style="color:#4285F4">G</span><span style="color:#EA4335">o</span><span style="color:#FBBC05">o</span><span style="color:#4285F4">g</span><span style="color:#34A853">l</span><span style="color:#EA4335">e</span>
+                            </span>
+                        </div>
+                        <div>
+                            <span class="d-none d-sm-inline">Keyboard shortcuts</span>
+                            <span class="mx-1">•</span>
+                            <span>Map Data</span>
+                            <span class="mx-1">•</span>
+                            <span>Terms</span>
+                            <span class="mx-1">•</span>
+                            <span class="d-none d-sm-inline">Report a map error</span>
+                        </div>
                     </div>
                 </div>
-                <div class="d-flex justify-content-between align-items-center pt-2 border-top" style="border-color: var(--dash-border) !important;">
-                    <span class="small text-muted">Saved favorites</span>
-                    <a href="wishlist.php" class="small text-danger fw-bold text-decoration-none">
-                        Saved items →
-                    </a>
+
+                <!-- Footer Location Pin & Area Switcher -->
+                <div class="location-area-footer">
+                    <div class="dropdown d-inline-block">
+                        <button class="location-name-pill dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" id="dashLocationLabel">
+                            <i class="fa-solid fa-location-dot text-danger"></i> <span id="currentAreaName">Gari Khata</span>
+                        </button>
+                        <ul class="dropdown-menu dropdown-menu-center shadow border-0" style="border-radius:12px; font-size:13px;">
+                            <li><h6 class="dropdown-header">Hyderabad Localities:</h6></li>
+                            <li><a class="dropdown-item active" href="javascript:void(0)" onclick="switchDashboardLocation(25.3850, 68.3650, 'Gari Khata')"><i class="fa-solid fa-location-pin me-2 text-danger"></i> Gari Khata (Fazal Sun City)</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" onclick="switchDashboardLocation(25.4012, 68.3340, 'Qasimabad')"><i class="fa-solid fa-location-pin me-2 text-primary"></i> Qasimabad</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" onclick="switchDashboardLocation(25.3620, 68.3580, 'Latifabad')"><i class="fa-solid fa-location-pin me-2 text-success"></i> Latifabad</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" onclick="switchDashboardLocation(25.3960, 68.3690, 'Saddar')"><i class="fa-solid fa-location-pin me-2 text-warning"></i> Saddar Bazaar</a></li>
+                            <li><a class="dropdown-item" href="javascript:void(0)" onclick="switchDashboardLocation(25.3820, 68.3410, 'Auto Bhan')"><i class="fa-solid fa-location-pin me-2 text-info"></i> Auto Bhan Road</a></li>
+                        </ul>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1340,7 +2508,7 @@ html.dark-theme .analytics-loader-overlay {
     <!-- ── 3. Interactive Section Tabs ── -->
     <ul class="nav dash-nav-pills" id="dashboardTabs" role="tablist">
         <li class="nav-item" role="presentation">
-            <button class="nav-link active" id="active-bids-tab" data-bs-toggle="tab" data-bs-target="#activeBidsTab" type="button" role="tab" aria-selected="true">
+            <button class="nav-link <?= $active_dashboard_tab === 'activeBidsTab' ? 'active' : '' ?>" id="active-bids-tab" data-bs-toggle="tab" data-bs-target="#activeBidsTab" type="button" role="tab" aria-selected="<?= $active_dashboard_tab === 'activeBidsTab' ? 'true' : 'false' ?>">
                 <i class="fa-solid fa-gavel"></i> My Active Bids
                 <span class="badge rounded-pill bg-success-subtle text-success ms-1"><?= count($active_bids_list) ?></span>
             </button>
@@ -1370,8 +2538,9 @@ html.dark-theme .analytics-loader-overlay {
             </button>
         </li>
         <li class="nav-item" role="presentation">
-            <button class="nav-link" id="explore-tab" data-bs-toggle="tab" data-bs-target="#exploreTab" type="button" role="tab" aria-selected="false">
+            <button class="nav-link <?= $active_dashboard_tab === 'exploreTab' ? 'active' : '' ?>" id="explore-tab" data-bs-toggle="tab" data-bs-target="#exploreTab" type="button" role="tab" aria-selected="<?= $active_dashboard_tab === 'exploreTab' ? 'true' : 'false' ?>">
                 <i class="fa-solid fa-fire text-danger"></i> Explore Live Auctions
+                <span class="badge rounded-pill bg-danger-subtle text-danger ms-1"><?= count($explore_auctions) ?></span>
             </button>
         </li>
     </ul>
@@ -1382,7 +2551,7 @@ html.dark-theme .analytics-loader-overlay {
         <!-- =============================================================== -->
         <!-- TAB 1: MY ACTIVE BIDS                                           -->
         <!-- =============================================================== -->
-        <div class="tab-pane fade show active" id="activeBidsTab" role="tabpanel" aria-labelledby="active-bids-tab">
+        <div class="tab-pane fade <?= $active_dashboard_tab === 'activeBidsTab' ? 'show active' : '' ?>" id="activeBidsTab" role="tabpanel" aria-labelledby="active-bids-tab">
             <div class="dash-panel">
                 <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                     <div>
@@ -2013,85 +3182,312 @@ html.dark-theme .analytics-loader-overlay {
         <!-- =============================================================== -->
         <!-- TAB 6: EXPLORE LIVE AUCTIONS                                    -->
         <!-- =============================================================== -->
-        <div class="tab-pane fade" id="exploreTab" role="tabpanel" aria-labelledby="explore-tab">
-            <div class="dash-panel">
-                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-                    <div>
-                        <h2 class="h5 fw-bold mb-1">Trending Live Auctions</h2>
-                        <p class="text-muted small mb-0">High-demand asset lots closing soon across verified categories.</p>
+        <!-- =============================================================== -->
+        <!-- TAB 6: EXPLORE LIVE AUCTIONS (Matching User Design)              -->
+        <!-- =============================================================== -->
+        <div class="tab-pane fade <?= $active_dashboard_tab === 'exploreTab' ? 'show active' : '' ?>" id="exploreTab" role="tabpanel" aria-labelledby="explore-tab">
+            <div class="geo-live-container">
+
+                <!-- 1. Top Hero Banner -->
+                <div class="geo-live-hero-banner">
+                    <div class="geo-hero-left">
+                        <div class="geo-hero-gavel">
+                            <i class="fa-solid fa-gavel"></i>
+                        </div>
+                        <div>
+                            <h2 class="geo-hero-title">Live Auction</h2>
+                            <p class="geo-hero-sub">Real-Time Bidding &bull; Best Deals &bull; Trusted Platform</p>
+                        </div>
                     </div>
-                    <div>
-                        <a href="../live_auction.php" class="btn-dash-primary btn-sm">
-                            <i class="fa-solid fa-arrow-up-right-from-square"></i> Open Full Auction Catalog
-                        </a>
+                    <div class="geo-hero-right">
+                        <span class="geo-live-pill">
+                            <span class="geo-pulse-dot"></span> Live Now
+                        </span>
                     </div>
                 </div>
 
-                <?php if (!empty($explore_auctions)): ?>
-                    <div class="row g-4">
-                        <?php foreach ($explore_auctions as $lot): 
-                            $lot_img    = get_dash_image_url($lot['featured_image']);
-                            $lot_price  = (float)($lot['current_price'] > 0 ? $lot['current_price'] : $lot['starting_price']);
-                            $lot_min    = $lot_price + (float)($lot['min_increment'] > 0 ? $lot['min_increment'] : 100);
-                            $lot_url    = "../live_auction.php?id=" . (int)$lot['id'];
-                        ?>
-                            <div class="col-lg-4 col-md-6 col-12">
-                                <div class="card h-100 border shadow-sm" style="border-radius: 12px; overflow: hidden; background: var(--dash-surface);">
-                                    <div style="height: 190px; overflow: hidden; position: relative; background: #f1f5f9;">
-                                        <img src="<?= htmlspecialchars($lot_img) ?>" alt="<?= htmlspecialchars($lot['title']) ?>" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.onerror=null; this.src='https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=400&q=80';">
-                                        <span class="position-absolute top-0 end-0 m-2 badge bg-dark bg-opacity-75 px-2 py-1">
-                                            <?= htmlspecialchars($lot['category_name'] ?? 'Auction') ?>
-                                        </span>
-                                    </div>
-                                    <div class="card-body d-flex flex-column justify-content-between p-3">
-                                        <div>
-                                            <a href="<?= $lot_url ?>" class="fw-bold text-dark-emphasis text-decoration-none d-block mb-2">
-                                                <?= htmlspecialchars($lot['title']) ?>
+                <!-- 2. Horizontal Filters Bar -->
+                <form method="GET" action="" class="geo-top-filters-bar">
+                    <input type="hidden" name="tab" value="explore">
+                    <div class="geo-filters-row">
+                        <!-- All Categories -->
+                        <div class="geo-pill-box">
+                            <i class="fa-solid fa-table-cells-large"></i>
+                            <select name="category_id">
+                                <option value="">All Categories</option>
+                                <?php foreach ($categories_list as $cat): ?>
+                                    <option value="<?= (int)$cat['id'] ?>" <?= $filter_category == $cat['id'] ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($cat['name']) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <!-- Search -->
+                        <div class="geo-pill-box" style="flex: 2 1 180px;">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <input type="text" name="search" placeholder="Search items..." value="<?= htmlspecialchars($filter_search) ?>">
+                        </div>
+
+                        <!-- Min Price -->
+                        <div class="geo-pill-box">
+                            <i class="fa-solid fa-tag"></i>
+                            <input type="number" name="min_price" placeholder="Min Price" value="<?= $filter_min_price > 0 ? $filter_min_price : '' ?>">
+                        </div>
+
+                        <!-- Max Price -->
+                        <div class="geo-pill-box">
+                            <i class="fa-solid fa-tag"></i>
+                            <input type="number" name="max_price" placeholder="Max Price" value="<?= $filter_max_price > 0 ? $filter_max_price : '' ?>">
+                        </div>
+
+                        <!-- Condition -->
+                        <div class="geo-pill-box">
+                            <i class="fa-solid fa-shield-halved"></i>
+                            <select name="condition">
+                                <option value="">Condition</option>
+                                <option value="new" <?= $filter_condition === 'new' ? 'selected' : '' ?>>Brand New</option>
+                                <option value="used" <?= $filter_condition === 'used' ? 'selected' : '' ?>>Used</option>
+                                <option value="refurbished" <?= $filter_condition === 'refurbished' ? 'selected' : '' ?>>Refurbished</option>
+                            </select>
+                        </div>
+
+                        <!-- Location -->
+                        <div class="geo-pill-box">
+                            <i class="fa-solid fa-location-dot"></i>
+                            <select name="location">
+                                <option value="">Location</option>
+                                <?php foreach (['Karachi', 'Lahore', 'Islamabad', 'Rawalpindi', 'Peshawar', 'Faisalabad', 'Multan', 'Quetta'] as $c): ?>
+                                    <option value="<?= $c ?>" <?= $filter_location === $c ? 'selected' : '' ?>><?= $c ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <!-- Sort By -->
+                        <div class="geo-pill-box">
+                            <i class="fa-solid fa-arrow-down-short-wide"></i>
+                            <select name="sort">
+                                <option value="newest" <?= $filter_sort === 'newest' ? 'selected' : '' ?>>Sort By</option>
+                                <option value="ending_soon" <?= $filter_sort === 'ending_soon' ? 'selected' : '' ?>>Ending Soon</option>
+                                <option value="price_low" <?= $filter_sort === 'price_low' ? 'selected' : '' ?>>Price: Low to High</option>
+                                <option value="price_high" <?= $filter_sort === 'price_high' ? 'selected' : '' ?>>Price: High to Low</option>
+                                <option value="popular" <?= $filter_sort === 'popular' ? 'selected' : '' ?>>Most Popular</option>
+                            </select>
+                        </div>
+
+                        <!-- Apply Button -->
+                        <button type="submit" class="geo-btn-apply-filters">
+                            <i class="fa-solid fa-filter"></i> Apply Filter
+                        </button>
+
+                        <?php if ($is_filter_active): ?>
+                            <a href="dashboard.php?tab=explore" class="btn btn-sm btn-outline-secondary" style="border-radius: 10px; padding: 8px 12px;" title="Reset Filters">
+                                <i class="fa-solid fa-xmark"></i> Reset
+                            </a>
+                        <?php endif; ?>
+                    </div>
+                </form>
+
+                <!-- 3. Two-Column Layout (Cards on Left + Sidebar Filters on Right) -->
+                <div class="geo-live-layout-wrap">
+                    <!-- Left Column: Cards Grid -->
+                    <div class="geo-cards-col">
+                        <?php if (!empty($explore_auctions)): ?>
+                            <div class="geo-auction-cards-grid">
+                                <?php foreach ($explore_auctions as $lot): 
+                                    $lot_img      = get_dash_image_url($lot['featured_image']);
+                                    $lot_price    = (float)($lot['current_price'] > 0 ? $lot['current_price'] : $lot['starting_price']);
+                                    $lot_min      = $lot_price + (float)($lot['min_increment'] > 0 ? $lot['min_increment'] : 100);
+                                    $lot_url      = "../live_auction.php?id=" . (int)$lot['id'];
+                                    $bids_count   = (int)($lot['bid_count'] ?? 0);
+                                    $city         = !empty($lot['city']) ? $lot['city'] : (!empty($lot['location_city']) ? $lot['location_city'] : 'Karachi');
+                                    $state        = !empty($lot['location_state']) ? $lot['location_state'] : 'Sindh';
+                                    $full_loc     = $city . ($state ? ', ' . $state : '');
+                                    $watchers     = (int)($lot['watcher_count'] > 0 ? $lot['watcher_count'] : ((($lot['id'] * 17) % 220) + 48));
+                                    
+                                    $seller_name  = !empty($lot['seller_name']) ? $lot['seller_name'] : 'Prime Properties';
+                                    $seller_img   = !empty($lot['seller_avatar']) ? get_dash_image_url($lot['seller_avatar']) : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80';
+                                ?>
+                                    <div class="geo-style-card">
+                                        <!-- Thumbnail Box with 4 corner overlay badges -->
+                                        <div class="geo-card-thumb-wrap">
+                                            <a href="<?= $lot_url ?>" tabindex="-1">
+                                                <img src="<?= htmlspecialchars($lot_img) ?>" alt="<?= htmlspecialchars($lot['title']) ?>" loading="lazy" onerror="this.onerror=null; this.src='https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=600&q=80';">
                                             </a>
-                                            <div class="d-flex justify-content-between align-items-center mb-3">
-                                                <div>
-                                                    <div class="small text-muted">Current Bid</div>
-                                                    <div class="fw-bold text-success fs-5">Rs. <?= number_format($lot_price, 2) ?></div>
-                                                </div>
-                                                <div class="text-end">
-                                                    <div class="small text-muted">Total Bids</div>
-                                                    <div class="fw-semibold"><?= (int)$lot['bid_count'] ?> bids</div>
-                                                </div>
-                                            </div>
+                                            
+                                            <!-- Top-Left LIVE Badge -->
+                                            <span class="geo-badge-live-stream">
+                                                <i class="fa-solid fa-tower-broadcast"></i> LIVE
+                                            </span>
+
+                                            <!-- Top-Right Watchers Pill -->
+                                            <span class="geo-badge-card-pill top-right">
+                                                <i class="fa-regular fa-eye"></i> <?= number_format($watchers) ?>
+                                            </span>
+
+                                            <!-- Bottom-Left Location Pill -->
+                                            <span class="geo-badge-card-pill bottom-left">
+                                                <i class="fa-solid fa-location-dot"></i> <?= htmlspecialchars($city) ?>
+                                            </span>
+
+                                            <!-- Bottom-Right Countdown Pill -->
+                                            <span class="geo-badge-card-pill bottom-right badge-timer" data-countdown="<?= htmlspecialchars($lot['end_time'] ?? date('Y-m-d H:i:s', time() + 86400 * 3)) ?>">
+                                                <i class="fa-regular fa-clock"></i> <span>02:14:32</span>
+                                            </span>
                                         </div>
 
-                                        <div>
-                                            <div class="d-flex justify-content-between align-items-center mb-3 pt-2 border-top">
-                                                <span class="badge-timer" data-countdown="<?= htmlspecialchars($lot['end_time']) ?>">
-                                                    <i class="fa-regular fa-clock"></i> <span>Calculating...</span>
-                                                </span>
-                                                <span class="small text-muted">#<?= htmlspecialchars($lot['auction_code']) ?></span>
+                                        <!-- Card Content -->
+                                        <div class="geo-card-body">
+                                            <h3 class="geo-card-title">
+                                                <a href="<?= $lot_url ?>" title="<?= htmlspecialchars($lot['title']) ?>">
+                                                    <?= htmlspecialchars($lot['title']) ?>
+                                                </a>
+                                            </h3>
+
+                                            <div class="geo-card-location">
+                                                <i class="fa-solid fa-location-dot"></i> <?= htmlspecialchars($full_loc) ?>
                                             </div>
 
-                                            <button type="button" 
-                                                    class="btn btn-sm btn-dash-primary w-100 quick-raise-btn"
-                                                    data-id="<?= (int)$lot['id'] ?>"
-                                                    data-title="<?= htmlspecialchars($lot['title']) ?>"
-                                                    data-code="<?= htmlspecialchars($lot['auction_code']) ?>"
-                                                    data-current="<?= $lot_price ?>"
-                                                    data-min="<?= $lot_min ?>"
-                                                    data-thumb="<?= htmlspecialchars($lot_img) ?>"
-                                                    onclick="openRaiseBidModal(this)">
-                                                <i class="fa-solid fa-gavel me-1"></i> Place Bid Now
-                                            </button>
+                                            <!-- Price Row -->
+                                            <div class="geo-card-price-row">
+                                                <span class="geo-card-price">PKR <?= number_format($lot_price) ?></span>
+                                                <span class="geo-badge-current-bid">Current Bid</span>
+                                            </div>
+
+                                            <!-- Meta Row -->
+                                            <div class="geo-card-meta-row">
+                                                <span><i class="fa-solid fa-gavel"></i> <?= $bids_count ?> Bids</span>
+                                                <span><i class="fa-regular fa-eye"></i> <?= number_format($watchers) ?> Watchers</span>
+                                            </div>
+
+                                            <!-- Footer Row -->
+                                            <div class="geo-card-footer">
+                                                <div class="geo-seller-info">
+                                                    <img src="<?= htmlspecialchars($seller_img) ?>" alt="<?= htmlspecialchars($seller_name) ?>" class="geo-seller-avatar" onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=<?= urlencode($seller_name) ?>&background=047857&color=fff&size=64';">
+                                                    <div class="geo-seller-meta">
+                                                        <div class="geo-seller-name">
+                                                            <?= htmlspecialchars($seller_name) ?>
+                                                            <i class="fa-solid fa-circle-check text-primary" title="Verified Seller"></i>
+                                                        </div>
+                                                        <span class="geo-seller-status">Verified Seller</span>
+                                                    </div>
+                                                </div>
+
+                                                <button type="button" 
+                                                        class="btn-geo-place-bid quick-raise-btn"
+                                                        data-id="<?= (int)$lot['id'] ?>"
+                                                        data-title="<?= htmlspecialchars($lot['title']) ?>"
+                                                        data-code="<?= htmlspecialchars($lot['auction_code']) ?>"
+                                                        data-current="<?= $lot_price ?>"
+                                                        data-min="<?= $lot_min ?>"
+                                                        data-thumb="<?= htmlspecialchars($lot_img) ?>"
+                                                        onclick="openRaiseBidModal(this)">
+                                                    <i class="fa-solid fa-gavel"></i> Place Bid
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php else: ?>
+                            <div class="card p-5 text-center border-0 shadow-sm" style="border-radius: 16px; background: var(--dash-surface);">
+                                <div class="mb-3 text-muted fs-1"><i class="fa-solid fa-gavel text-secondary-subtle"></i></div>
+                                <h4 class="fw-bold">No Live Auctions Match Your Filters</h4>
+                                <p class="text-muted small">Try adjusting your price range, category, or search keywords.</p>
+                                <div>
+                                    <a href="dashboard.php?tab=explore" class="btn btn-sm btn-dash-primary mt-2">
+                                        <i class="fa-solid fa-arrow-rotate-left"></i> Reset All Filters
+                                    </a>
                                 </div>
                             </div>
-                        <?php endforeach; ?>
+                        <?php endif; ?>
                     </div>
-                <?php else: ?>
-                    <div class="text-center py-5">
-                        <div class="mb-3 text-muted fs-1"><i class="fa-solid fa-gavel"></i></div>
-                        <h5>No Live Auctions Available</h5>
-                        <p class="text-muted small">Check back soon for newly published lots.</p>
+
+                    <!-- Right Column: Sidebar Filters & Auctions Near Me -->
+                    <div class="geo-sidebar-col">
+                        <div class="geo-sidebar-filters-card">
+                            <div class="geo-sidebar-header">
+                                <h4>Filters</h4>
+                                <a href="dashboard.php?tab=explore" title="Reset Filters"><i class="fa-solid fa-xmark"></i></a>
+                            </div>
+
+                            <form method="GET" action="">
+                                <input type="hidden" name="tab" value="explore">
+
+                                <div class="geo-sidebar-group">
+                                    <label>Category</label>
+                                    <select name="category_id" class="geo-sidebar-select">
+                                        <option value="">All Categories</option>
+                                        <?php foreach ($categories_list as $cat): ?>
+                                            <option value="<?= (int)$cat['id'] ?>" <?= $filter_category == $cat['id'] ? 'selected' : '' ?>>
+                                                <?= htmlspecialchars($cat['name']) ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <div class="geo-sidebar-group">
+                                    <label>Price Range</label>
+                                    <div class="geo-price-range-inputs">
+                                        <input type="number" name="min_price" class="geo-sidebar-input" placeholder="Min Price" value="<?= $filter_min_price > 0 ? $filter_min_price : '' ?>">
+                                        <input type="number" name="max_price" class="geo-sidebar-input" placeholder="Max Price" value="<?= $filter_max_price > 0 ? $filter_max_price : '' ?>">
+                                    </div>
+                                </div>
+
+                                <div class="geo-sidebar-group">
+                                    <label>Condition</label>
+                                    <select name="condition" class="geo-sidebar-select">
+                                        <option value="">All Conditions</option>
+                                        <option value="new" <?= $filter_condition === 'new' ? 'selected' : '' ?>>Brand New</option>
+                                        <option value="used" <?= $filter_condition === 'used' ? 'selected' : '' ?>>Used / Pre-owned</option>
+                                        <option value="refurbished" <?= $filter_condition === 'refurbished' ? 'selected' : '' ?>>Refurbished</option>
+                                    </select>
+                                </div>
+
+                                <div class="geo-sidebar-group">
+                                    <label>Location</label>
+                                    <select name="location" class="geo-sidebar-select">
+                                        <option value="">All Locations</option>
+                                        <?php foreach (['Karachi', 'Lahore', 'Islamabad', 'Rawalpindi', 'Peshawar', 'Faisalabad', 'Multan', 'Quetta'] as $c): ?>
+                                            <option value="<?= $c ?>" <?= $filter_location === $c ? 'selected' : '' ?>><?= $c ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+
+                                <div class="geo-sidebar-group">
+                                    <label>Sort By</label>
+                                    <select name="sort" class="geo-sidebar-select">
+                                        <option value="newest" <?= $filter_sort === 'newest' ? 'selected' : '' ?>>Newest First</option>
+                                        <option value="ending_soon" <?= $filter_sort === 'ending_soon' ? 'selected' : '' ?>>Ending Soonest</option>
+                                        <option value="price_low" <?= $filter_sort === 'price_low' ? 'selected' : '' ?>>Price: Low to High</option>
+                                        <option value="price_high" <?= $filter_sort === 'price_high' ? 'selected' : '' ?>>Price: High to Low</option>
+                                        <option value="popular" <?= $filter_sort === 'popular' ? 'selected' : '' ?>>Most Popular</option>
+                                    </select>
+                                </div>
+
+                                <button type="submit" class="geo-btn-sidebar-apply">
+                                    <i class="fa-solid fa-filter"></i> Apply Filter
+                                </button>
+                            </form>
+
+                            <!-- Auctions Near Me section -->
+                            <div class="geo-near-me-box">
+                                <div class="geo-near-me-title">
+                                    <i class="fa-solid fa-location-crosshairs"></i> Auctions Near Me
+                                </div>
+                                <div class="geo-radius-pills-grid">
+                                    <?php foreach ([1, 2, 5, 10, 20, 25] as $rad): ?>
+                                        <a href="dashboard.php?tab=explore&radius=<?= $rad ?>&location=<?= urlencode($filter_location ?: 'Karachi') ?>" 
+                                           class="geo-radius-pill-btn <?= (int)$filter_radius === $rad ? 'active' : '' ?>">
+                                            <?= $rad ?> km
+                                        </a>
+                                    <?php endforeach; ?>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                <?php endif; ?>
+                </div>
+
             </div>
         </div>
 
@@ -2220,17 +3616,22 @@ html.dark-theme .analytics-loader-overlay {
                     <?php endif; ?>
                 </div>
 
-                <div class="modal-footer bg-light p-3">
-                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <?php if ($user_wallet_balance > 0): ?>
-                        <button type="submit" class="btn-dash-primary px-4">
-                            <i class="fa-solid fa-lock me-1"></i> Confirm & Settle Payment
-                        </button>
-                    <?php else: ?>
-                        <a href="wallet.php" class="btn btn-warning fw-bold px-4">
-                            <i class="fa-solid fa-wallet me-1"></i> Top-up Wallet First
-                        </a>
-                    <?php endif; ?>
+                <div class="modal-footer bg-light p-3 d-flex justify-content-between flex-wrap gap-2">
+                    <a id="payManualTransferLink" href="pay.php" class="btn btn-outline-success fw-bold px-3">
+                        <i class="fa-solid fa-building-columns me-1"></i> Pay via Bank / JazzCash
+                    </a>
+                    <div class="d-flex gap-2">
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <?php if ($user_wallet_balance > 0): ?>
+                            <button type="submit" class="btn-dash-primary px-3">
+                                <i class="fa-solid fa-lock me-1"></i> Pay with Wallet
+                            </button>
+                        <?php else: ?>
+                            <a href="wallet.php" class="btn btn-warning fw-bold px-3">
+                                <i class="fa-solid fa-wallet me-1"></i> Top-up Wallet
+                            </a>
+                        <?php endif; ?>
+                    </div>
                 </div>
             </form>
         </div>
@@ -2303,15 +3704,63 @@ html.dark-theme .analytics-loader-overlay {
 <script>
 document.addEventListener('DOMContentLoaded', function() {
 
-    // 1. Dynamic Live Clock in Banner
+    // 1. Dynamic Live Clock in Circular Clock Widget & Banner (Pakistan / Karachi Time)
     function updateLiveClock() {
-        const el = document.getElementById('dashLiveClock');
-        if (!el) return;
         const now = new Date();
-        el.textContent = now.toLocaleDateString('en-US', {
-            weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'
-        }) + ' - ' + now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+        // Enforce Pakistan / Karachi (Asia/Karachi, PKT, UTC+5) Time
+        const timeFormatter = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Asia/Karachi',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        });
+        const timeStr = timeFormatter.format(now); // e.g. "16:57" or "17:02"
+
+        // Enforce Pakistan / Karachi Date: "Fri October 09"
+        const dateFormatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Asia/Karachi',
+            weekday: 'short',
+            month: 'long',
+            day: '2-digit'
+        });
+        const parts = dateFormatter.formatToParts(now);
+        let weekday = '', month = '', day = '';
+        parts.forEach(p => {
+            if (p.type === 'weekday') weekday = p.value;
+            if (p.type === 'month') month = p.value;
+            if (p.type === 'day') day = p.value;
+        });
+        const dateStr = weekday + ' ' + month + ' ' + day;
+
+        // Circular widget elements
+        const timeEl = document.getElementById('dashClockTime');
+        if (timeEl) {
+            timeEl.textContent = timeStr;
+        }
+
+        const dateEl = document.getElementById('dashClockDate');
+        if (dateEl) {
+            dateEl.textContent = dateStr;
+        }
+
+        const el = document.getElementById('dashLiveClock');
+        if (el) {
+            const fullFormatter = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'Asia/Karachi',
+                weekday: 'short',
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true
+            });
+            el.textContent = fullFormatter.format(now) + ' (PKT)';
+        }
     }
+    updateLiveClock();
     setInterval(updateLiveClock, 1000);
 
     // 2. Real-Time Auction Countdown Timers
@@ -2329,24 +3778,34 @@ document.addEventListener('DOMContentLoaded', function() {
             const textSpan = badge.querySelector('span') || badge;
 
             if (diff <= 0) {
-                badge.className = 'badge bg-secondary-subtle text-secondary';
-                textSpan.innerHTML = '<i class="fa-solid fa-flag-checkered me-1"></i> Concluded';
+                if (badge.classList.contains('geo-badge-card-pill')) {
+                    textSpan.textContent = '00:00:00';
+                } else {
+                    badge.className = 'badge bg-secondary-subtle text-secondary';
+                    textSpan.innerHTML = '<i class="fa-solid fa-flag-checkered me-1"></i> Concluded';
+                }
             } else {
                 const days = Math.floor(diff / (1000 * 60 * 60 * 24));
                 const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
                 const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
                 const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+                const pad = (n) => String(n).padStart(2, '0');
 
-                if (days > 0) {
-                    textSpan.textContent = `${days}d ${hours}h ${minutes}m left`;
-                } else if (hours > 0) {
-                    textSpan.textContent = `${hours}h ${minutes}m ${seconds}s left`;
-                    if (hours < 1) {
-                        badge.classList.add('urgent');
-                    }
+                if (badge.classList.contains('geo-badge-card-pill')) {
+                    const totalH = (days * 24) + hours;
+                    textSpan.textContent = `${pad(totalH)}:${pad(minutes)}:${pad(seconds)}`;
                 } else {
-                    badge.classList.add('urgent');
-                    textSpan.textContent = `${minutes}m ${seconds}s left`;
+                    if (days > 0) {
+                        textSpan.textContent = `${days}d ${hours}h ${minutes}m left`;
+                    } else if (hours > 0) {
+                        textSpan.textContent = `${hours}h ${minutes}m ${seconds}s left`;
+                        if (hours < 1) {
+                            badge.classList.add('urgent');
+                        }
+                    } else {
+                        badge.classList.add('urgent');
+                        textSpan.textContent = `${minutes}m ${seconds}s left`;
+                    }
                 }
             }
         });
@@ -2767,6 +4226,11 @@ function openQuickPayModal(btn) {
     document.getElementById('payItemId').value = itemId;
     document.getElementById('payItemTitle').textContent = title;
     document.getElementById('payHammerPrice').textContent = 'Rs. ' + hammer.toLocaleString('en-US', { minimumFractionDigits: 2 });
+    
+    const manualLink = document.getElementById('payManualTransferLink');
+    if (manualLink) {
+        manualLink.href = 'pay.php?item_id=' + itemId;
+    }
 
     const modal = new bootstrap.Modal(document.getElementById('quickPayModal'));
     modal.show();
@@ -2790,6 +4254,149 @@ function openReceiptModal(btn) {
 
     const modal = new bootstrap.Modal(document.getElementById('receiptModal'));
     modal.show();
+}
+
+// =============================================================================
+// 10. Location & Area Interactive Satellite Map Controller
+// =============================================================================
+let dashLocationMap = null;
+let dashLocationMarker = null;
+let currentDashLat = 25.3850;
+let currentDashLng = 68.3650;
+let currentDashZoom = 16;
+let currentDashMapStyle = 'satellite';
+
+let dashSatelliteLayer = null;
+let dashStreetLayer = null;
+
+function initDashboardLocationMap() {
+    const mapContainer = document.getElementById('dashboardLocationMap');
+    if (!mapContainer || typeof L === 'undefined') return;
+
+    try {
+        dashLocationMap = L.map('dashboardLocationMap', {
+            center: [currentDashLat, currentDashLng],
+            zoom: currentDashZoom,
+            zoomControl: false,
+            attributionControl: false,
+            scrollWheelZoom: true,
+            doubleClickZoom: true,
+            dragging: true
+        });
+
+        // Google Hybrid Satellite Tile Layer (matches user screenshot)
+        dashSatelliteLayer = L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
+            maxZoom: 20,
+            subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
+        });
+
+        // Google Standard Street Layer (for style toggle)
+        dashStreetLayer = L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
+            maxZoom: 20,
+            subdomains: ['mt0', 'mt1', 'mt2', 'mt3']
+        });
+
+        // Add satellite layer as default
+        dashSatelliteLayer.addTo(dashLocationMap);
+
+        // Custom pulsing marker or standard pin
+        const customIcon = L.divIcon({
+            className: 'custom-map-pin',
+            html: '<div style="background:#ef4444; color:#ffffff; width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; box-shadow:0 3px 8px rgba(0,0,0,0.35); border:2px solid #ffffff; font-size:13px;"><i class="fa-solid fa-location-dot"></i></div>',
+            iconSize: [28, 28],
+            iconAnchor: [14, 28],
+            popupAnchor: [0, -28]
+        });
+
+        dashLocationMarker = L.marker([currentDashLat, currentDashLng], { icon: customIcon })
+            .addTo(dashLocationMap)
+            .bindPopup(`
+                <div style="font-size:12px; font-weight:700; text-align:center; min-width:140px; padding:2px;">
+                    <div class="text-danger"><i class="fa-solid fa-location-dot"></i> Gari Khata</div>
+                    <div style="font-size:11px; font-weight:400; color:#64748b; margin-top:2px;">Fazal Sun City, Hyderabad</div>
+                    <div class="mt-2"><span class="badge bg-success-subtle text-success" style="font-size:10px;">Active Bidding Zone</span></div>
+                </div>
+            `);
+
+        // Navigation button listeners
+        const btnPanLeft    = document.getElementById('mapPanLeft');
+        const btnPanRight   = document.getElementById('mapPanRight');
+        const btnPanUp      = document.getElementById('mapPanUp');
+        const btnPanDown    = document.getElementById('mapPanDown');
+        const btnZoomIn     = document.getElementById('mapZoomIn');
+        const btnZoomOut    = document.getElementById('mapZoomOut');
+        const btnRecenter   = document.getElementById('mapRecenter');
+        const btnToggleThumb= document.getElementById('mapStyleToggleThumb');
+
+        if (btnPanLeft)    btnPanLeft.addEventListener('click', (e) => { e.preventDefault(); dashLocationMap.panBy([-80, 0]); });
+        if (btnPanRight)   btnPanRight.addEventListener('click', (e) => { e.preventDefault(); dashLocationMap.panBy([80, 0]); });
+        if (btnPanUp)      btnPanUp.addEventListener('click', (e) => { e.preventDefault(); dashLocationMap.panBy([0, -80]); });
+        if (btnPanDown)    btnPanDown.addEventListener('click', (e) => { e.preventDefault(); dashLocationMap.panBy([0, 80]); });
+        if (btnZoomIn)     btnZoomIn.addEventListener('click', (e) => { e.preventDefault(); dashLocationMap.zoomIn(); });
+        if (btnZoomOut)    btnZoomOut.addEventListener('click', (e) => { e.preventDefault(); dashLocationMap.zoomOut(); });
+        if (btnRecenter)   btnRecenter.addEventListener('click', (e) => {
+            e.preventDefault();
+            dashLocationMap.flyTo([currentDashLat, currentDashLng], currentDashZoom, { duration: 0.8 });
+            if (dashLocationMarker) dashLocationMarker.openPopup();
+        });
+
+        // Toggle Satellite / Street view
+        if (btnToggleThumb) {
+            btnToggleThumb.addEventListener('click', (e) => {
+                e.preventDefault();
+                if (currentDashMapStyle === 'satellite') {
+                    dashLocationMap.removeLayer(dashSatelliteLayer);
+                    dashStreetLayer.addTo(dashLocationMap);
+                    currentDashMapStyle = 'street';
+                    btnToggleThumb.style.backgroundImage = "url('https://mt1.google.com/vt/lyrs=y&x=47352&y=27988&z=16')";
+                    btnToggleThumb.title = "Switch to Satellite View";
+                } else {
+                    dashLocationMap.removeLayer(dashStreetLayer);
+                    dashSatelliteLayer.addTo(dashLocationMap);
+                    currentDashMapStyle = 'satellite';
+                    btnToggleThumb.style.backgroundImage = "url('https://mt1.google.com/vt/lyrs=m&x=47352&y=27988&z=16')";
+                    btnToggleThumb.title = "Switch to Street View";
+                }
+            });
+        }
+
+        // Handle size adjustments
+        setTimeout(() => { if (dashLocationMap) dashLocationMap.invalidateSize(); }, 350);
+        window.addEventListener('resize', () => { if (dashLocationMap) dashLocationMap.invalidateSize(); });
+
+    } catch (err) {
+        console.warn('Dashboard Location map initialization skipped:', err);
+    }
+}
+
+// Switch Locality from footer dropdown
+window.switchDashboardLocation = function(lat, lng, name) {
+    if (!dashLocationMap) return;
+    currentDashLat = lat;
+    currentDashLng = lng;
+
+    dashLocationMap.flyTo([lat, lng], 16, { duration: 1.0 });
+
+    if (dashLocationMarker) {
+        dashLocationMarker.setLatLng([lat, lng]);
+        dashLocationMarker.bindPopup(`
+            <div style="font-size:12px; font-weight:700; text-align:center; min-width:140px; padding:2px;">
+                <div class="text-danger"><i class="fa-solid fa-location-dot"></i> ${name}</div>
+                <div style="font-size:11px; font-weight:400; color:#64748b; margin-top:2px;">Hyderabad, Sindh</div>
+                <div class="mt-2"><span class="badge bg-success-subtle text-success" style="font-size:10px;">Selected Locality</span></div>
+            </div>
+        `).openPopup();
+    }
+
+    const labelEl = document.getElementById('currentAreaName');
+    if (labelEl) labelEl.textContent = name;
+};
+
+// Initialize after DOM is fully loaded
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initDashboardLocationMap);
+} else {
+    initDashboardLocationMap();
 }
 </script>
 

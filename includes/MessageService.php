@@ -8,7 +8,7 @@
  * Adheres strictly to the schema of `messages` and `notifications` tables.
  */
 
-require_once __DIR__ . '/Database.php';
+require_once __DIR__ . '/database.php';
 require_once __DIR__ . '/NotificationService.php';
 
 class MessageService
@@ -27,9 +27,12 @@ class MessageService
      */
     public function getUser(int $userId): ?array
     {
-        $stmt = $this->pdo->prepare("SELECT id, name, username, email, avatar, role, status FROM users WHERE id = :id LIMIT 1");
+        $stmt = $this->pdo->prepare("SELECT id, name, email, avatar, role, status FROM users WHERE id = :id LIMIT 1");
         $stmt->execute([':id' => $userId]);
         $user = $stmt->fetch();
+        if ($user) {
+            $user['username'] = $user['name'] ?? '';
+        }
         return $user ?: null;
     }
 
@@ -138,18 +141,12 @@ class MessageService
 
             $messageId = (int)$this->pdo->lastInsertId();
 
-            $link = "messages.php?user_id=" . $senderId . ($itemId ? "&item_id=" . $itemId : "");
-            $notifTitle = "New Message";
-            $notifMessage = $senderName . " sent you a new message.";
-
-            $this->notifService->createNotification(
+            $this->notifService->notifyNewMessage(
                 $receiverId,
-                'message',
-                $notifTitle,
-                $notifMessage,
-                $link,
-                'fa-solid fa-message',
-                0
+                $senderName,
+                $cleanBody,
+                $senderId,
+                $itemId
             );
 
             $this->pdo->commit();
@@ -180,6 +177,7 @@ class MessageService
                     m.sender_id,
                     m.receiver_id,
                     m.message,
+                    m.message AS message_body,
                     m.item_id,
                     m.subject,
                     m.is_read,
@@ -208,7 +206,7 @@ class MessageService
 
         foreach ($rows as $row) {
             $isOutgoing = ((int)$row['sender_id'] === $currentUser);
-            $body = $row['message'] ?? '';
+            $body = !empty($row['message_body']) ? $row['message_body'] : ($row['message'] ?? '');
             $ts = strtotime($row['created_at']);
 
             $history[] = [
@@ -305,11 +303,11 @@ class MessageService
                 continue;
             }
 
-            $msgStmt = $this->pdo->prepare("SELECT message, created_at, sender_id, item_id FROM messages WHERE id = :mid LIMIT 1");
+            $msgStmt = $this->pdo->prepare("SELECT message, message AS message_body, created_at, sender_id, item_id FROM messages WHERE id = :mid LIMIT 1");
             $msgStmt->execute([':mid' => $p['latest_message_id']]);
             $latestMsg = $msgStmt->fetch();
 
-            $body = $latestMsg ? ($latestMsg['message'] ?? '') : '';
+            $body = $latestMsg ? (!empty($latestMsg['message_body']) ? $latestMsg['message_body'] : ($latestMsg['message'] ?? '')) : '';
             $preview = mb_substr($body, 0, 60) . (mb_strlen($body) > 60 ? '...' : '');
 
             $createdTs = strtotime($p['last_activity']);
@@ -361,15 +359,14 @@ class MessageService
         $searchSql = '';
 
         if (!empty($search)) {
-            $searchSql = " AND (name LIKE :s1 OR username LIKE :s2 OR email LIKE :s3 OR role LIKE :s4) ";
+            $searchSql = " AND (name LIKE :s1 OR email LIKE :s2 OR role LIKE :s3) ";
             $term = '%' . trim($search) . '%';
             $params[':s1'] = $term;
             $params[':s2'] = $term;
             $params[':s3'] = $term;
-            $params[':s4'] = $term;
         }
 
-        $sql = "SELECT id, name, username, email, role, avatar, status 
+        $sql = "SELECT id, name, email, role, avatar, status 
                 FROM users 
                 WHERE id != :current_user 
                   AND (status IS NULL OR status = 'active' OR status = '1')

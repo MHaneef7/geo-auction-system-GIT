@@ -11,6 +11,10 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 require_once __DIR__ . '/../includes/database.php';
+require_once __DIR__ . '/../includes/settings.php';
+
+$pdo = Database::getPdo();
+Settings::init($pdo);
 
 // Authentication Check: Ensure user is logged in
 if (!isset($_SESSION['user_id'])) {
@@ -40,19 +44,34 @@ function generate_slug($text) {
 // -------------------------------------------------------------
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_item'])) {
     // 1. Sanitize text inputs
-    $title         = trim($_POST['title'] ?? '');
-    $category_id   = (int)($_POST['category_id'] ?? 0);
-    $description   = trim($_POST['description'] ?? '');
-    $starting_bid  = (float)($_POST['starting_bid'] ?? 0);
-    $reserve_price = !empty($_POST['reserve_price']) ? (float)$_POST['reserve_price'] : null;
-    $min_increment = !empty($_POST['min_increment']) ? (float)$_POST['min_increment'] : 100.00;
-    $city          = trim($_POST['city'] ?? '');
-    $area          = trim($_POST['area'] ?? '');
-    $start_time    = trim($_POST['start_time'] ?? '');
-    $end_time      = trim($_POST['end_time'] ?? '');
+    $title          = trim($_POST['title'] ?? '');
+    $category_id    = (int)($_POST['category_id'] ?? 0);
+    $description    = trim($_POST['description'] ?? '');
+    $condition_type = trim($_POST['condition_type'] ?? '');
+    $brand          = trim($_POST['brand'] ?? '');
+    $model          = trim($_POST['model'] ?? '');
+    $year           = !empty($_POST['year']) ? (int)$_POST['year'] : null;
+    $starting_bid   = (float)($_POST['starting_bid'] ?? 0);
+    $reserve_price  = !empty($_POST['reserve_price']) ? (float)$_POST['reserve_price'] : null;
+    $default_inc    = (float)Settings::get('min_bid_increment', 100.00);
+    $min_increment  = !empty($_POST['min_increment']) ? (float)$_POST['min_increment'] : $default_inc;
+    $city           = trim($_POST['city'] ?? '');
+    $area           = trim($_POST['area'] ?? '');
+    $start_time     = trim($_POST['start_time'] ?? '');
+    $end_time       = trim($_POST['end_time'] ?? '');
 
-    // 2. Validate Required Fields
-    if ($title === '') {
+    // 2. Validate Required Fields & Platform Limits
+    $min_starting = (float)Settings::get('min_starting_price', 1.00);
+    $max_active_limit = (int)Settings::get('max_active_auctions_per_seller', 25);
+
+    // Check seller active auction cap
+    $cntStmt = $pdo->prepare("SELECT COUNT(*) FROM items WHERE seller_id = :sid AND status = 'active'");
+    $cntStmt->execute([':sid' => $user_id]);
+    $active_count = (int)$cntStmt->fetchColumn();
+
+    if ($active_count >= $max_active_limit) {
+        $error_msg = "You have reached your maximum active auctions limit ($max_active_limit active listings allowed).";
+    } elseif ($title === '') {
         $error_msg = 'Please enter an item title.';
     } elseif (mb_strlen($title) < 5 || mb_strlen($title) > 255) {
         $error_msg = 'Title must be between 5 and 255 characters.';
@@ -60,8 +79,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_item']
         $error_msg = 'Please select a valid auction category.';
     } elseif ($description === '') {
         $error_msg = 'Please provide a detailed item description.';
-    } elseif ($starting_bid <= 0) {
-        $error_msg = 'Starting bid price must be greater than zero (PKR).';
+    } elseif ($starting_bid < $min_starting) {
+        $error_msg = 'Starting bid price must be at least ' . Settings::get('currency_symbol', 'Rs. ') . number_format($min_starting, 2) . '.';
     } elseif ($reserve_price !== null && $reserve_price < $starting_bid) {
         $error_msg = 'Reserve price cannot be lower than the starting bid price.';
     } elseif ($min_increment <= 0) {
@@ -100,17 +119,18 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_item']
         } else {
             $files = $_FILES['item_images'];
             $file_count = count($files['name']);
+            $max_img_limit = (int)Settings::get('max_images_per_auction', 10);
 
-            if ($file_count > 5) {
-                $error_msg = 'You can upload a maximum of 5 images.';
+            if ($file_count > $max_img_limit) {
+                $error_msg = 'You can upload a maximum of ' . $max_img_limit . ' images.';
             } else {
                 $upload_dir = __DIR__ . '/../uploads/items/';
                 if (!is_dir($upload_dir)) {
                     mkdir($upload_dir, 0755, true);
                 }
 
-                $allowed_mimes = ['image/jpeg', 'image/png', 'image/webp'];
-                $allowed_exts  = ['jpg', 'jpeg', 'png', 'webp'];
+                $allowed_mimes = ['image/jpeg', 'image/pjpeg', 'image/png', 'image/x-png', 'image/webp', 'image/gif', 'image/avif', 'image/x-jfif'];
+                $allowed_exts  = ['jpg', 'jpeg', 'png', 'webp', 'jfif', 'pjpeg', 'gif', 'avif'];
 
                 for ($i = 0; $i < $file_count; $i++) {
                     if ($files['error'][$i] === UPLOAD_ERR_OK) {
@@ -120,16 +140,28 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_item']
                         $file_ext  = strtolower(pathinfo($orig_name, PATHINFO_EXTENSION));
 
                         // Check MIME type with mime_content_type
-                        $mime_type = mime_content_type($tmp_name);
+                        $mime_type = function_exists('mime_content_type') ? mime_content_type($tmp_name) : '';
+                        $img_info = @getimagesize($tmp_name);
+                        if (!empty($img_info['mime']) && empty($mime_type)) {
+                            $mime_type = $img_info['mime'];
+                        }
 
-                        if (!in_array($mime_type, $allowed_mimes) || !in_array($file_ext, $allowed_exts)) {
-                            $error_msg = 'Invalid image format for file: ' . htmlspecialchars($orig_name) . '. Only JPG, PNG, and WEBP are allowed.';
+                        if ((!in_array($mime_type, $allowed_mimes, true) && $img_info === false) || !in_array($file_ext, $allowed_exts, true)) {
+                            $error_msg = 'Invalid image format for file: ' . htmlspecialchars($orig_name) . '. Allowed: JPG, PNG, WEBP, JFIF, GIF.';
                             break;
-                        } elseif ($file_size > 5 * 1024 * 1024) { // 5MB limit
-                            $error_msg = 'File size exceeds 5MB limit for: ' . htmlspecialchars($orig_name);
+                        } elseif ($file_size > 8 * 1024 * 1024) { // 8MB limit
+                            $error_msg = 'File size exceeds 8MB limit for: ' . htmlspecialchars($orig_name);
                             break;
                         } else {
-                            $unique_filename = 'item_' . time() . '_' . bin2hex(random_bytes(4)) . '_' . $i . '.' . $file_ext;
+                            $normalized_ext = match($file_ext) {
+                                'jpeg', 'jfif', 'pjpeg' => 'jpg',
+                                'png' => 'png',
+                                'webp' => 'webp',
+                                'gif' => 'gif',
+                                'avif' => 'avif',
+                                default => 'jpg'
+                            };
+                            $unique_filename = 'item_' . time() . '_' . bin2hex(random_bytes(4)) . '_' . $i . '.' . $normalized_ext;
                             $target_filepath = $upload_dir . $unique_filename;
 
                             if (move_uploaded_file($tmp_name, $target_filepath)) {
@@ -153,123 +185,111 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_item']
         }
     }
 
-    // 5. Database Insertion with Prepared Statements and Transaction
+    // 5. Database Insertion with Prepared Statements and Transaction (OOP PDO)
     if ($error_msg === '') {
-        // Generate unique Auction Code
-        do {
-            $auction_code = 'AUC-' . strtoupper(substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ23456789'), 0, 6));
-            $chk_stmt = mysqli_prepare($conn, "SELECT id FROM items WHERE auction_code = ? LIMIT 1");
-            mysqli_stmt_bind_param($chk_stmt, "s", $auction_code);
-            mysqli_stmt_execute($chk_stmt);
-            $code_exists = mysqli_stmt_fetch($chk_stmt);
-            mysqli_stmt_close($chk_stmt);
-        } while ($code_exists);
+        $pdo = Database::getPdo();
+        try {
+            // Check available columns in items table for schema adaptability
+            $colStmt = $pdo->query("SHOW COLUMNS FROM items");
+            $tableCols = $colStmt->fetchAll(PDO::FETCH_COLUMN);
 
-        // Generate Slug
-        $slug = generate_slug($title);
-        $slug_chk = mysqli_prepare($conn, "SELECT id FROM items WHERE slug = ? LIMIT 1");
-        mysqli_stmt_bind_param($slug_chk, "s", $slug);
-        mysqli_stmt_execute($slug_chk);
-        if (mysqli_stmt_fetch($slug_chk)) {
-            $slug .= '-' . time();
-        }
-        mysqli_stmt_close($slug_chk);
+            // Generate unique Auction Code
+            do {
+                $auction_code = 'AUC-' . strtoupper(substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ23456789'), 0, 6));
+                $chk_stmt = $pdo->prepare("SELECT id FROM items WHERE auction_code = :code LIMIT 1");
+                $chk_stmt->execute([':code' => $auction_code]);
+                $code_exists = (bool)$chk_stmt->fetch();
+            } while ($code_exists);
 
-        $featured_image = $uploaded_images[0] ?? '';
-        $images_json    = json_encode($uploaded_images);
-        $status         = 'active';
-        $approved       = 1;
-
-        // Start Transaction
-        mysqli_begin_transaction($conn);
-
-        $insert_sql = "
-            INSERT INTO items (
-                auction_code,
-                title,
-                slug,
-                description,
-                starting_price,
-                reserve_price,
-                current_price,
-                min_increment,
-                seller_id,
-                category_id,
-                city,
-                area,
-                featured_image,
-                images,
-                status,
-                approved,
-                start_time,
-                end_time,
-                created_at,
-                updated_at
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW()
-            )
-        ";
-
-        $stmt = mysqli_prepare($conn, $insert_sql);
-        if ($stmt) {
-            mysqli_stmt_bind_param(
-                $stmt,
-                "ssssddddiisssssiss",
-                $auction_code,
-                $title,
-                $slug,
-                $description,
-                $starting_bid,
-                $reserve_price,
-                $starting_bid, // Initial current_price equals starting_bid
-                $min_increment,
-                $user_id,
-                $category_id,
-                $city,
-                $area,
-                $featured_image,
-                $images_json,
-                $status,
-                $approved,
-                $start_dt,
-                $end_dt
-            );
-
-            if (mysqli_stmt_execute($stmt)) {
-                $new_item_id = mysqli_insert_id($conn);
-                mysqli_stmt_close($stmt);
-
-                // Insert into item_images table
-                $img_sql = "INSERT INTO item_images (item_id, image_path, is_primary, created_at) VALUES (?, ?, ?, NOW())";
-                $img_stmt = mysqli_prepare($conn, $img_sql);
-
-                if ($img_stmt) {
-                    foreach ($uploaded_images as $idx => $img_path) {
-                        $is_primary = ($idx === 0) ? 1 : 0;
-                        mysqli_stmt_bind_param($img_stmt, "isi", $new_item_id, $img_path, $is_primary);
-                        mysqli_stmt_execute($img_stmt);
-                    }
-                    mysqli_stmt_close($img_stmt);
-                }
-
-                // Commit Transaction
-                mysqli_commit($conn);
-
-                $success_msg = "Auction item published successfully! Auction Code: " . $auction_code;
-                // Reset form values on success
-                $_POST = [];
-            } else {
-                mysqli_rollback($conn);
-                $error_msg = "Database execute error: " . mysqli_stmt_error($stmt);
-                mysqli_stmt_close($stmt);
-                // Clean up newly uploaded files on error
-                foreach ($raw_upload_paths as $file_path) {
-                    if (file_exists($file_path)) { @unlink($file_path); }
-                }
+            // Generate Slug
+            $slug = generate_slug($title);
+            $slug_chk = $pdo->prepare("SELECT id FROM items WHERE slug = :slug LIMIT 1");
+            $slug_chk->execute([':slug' => $slug]);
+            if ($slug_chk->fetch()) {
+                $slug .= '-' . time();
             }
-        } else {
-            mysqli_rollback($conn);
-            $error_msg = "Database prepare error: " . mysqli_error($conn);
+
+            $featured_image = $uploaded_images[0] ?? '';
+            $images_json    = json_encode($uploaded_images);
+            $req_approval   = ((int)Settings::get('auction_approval_required', 0) === 1);
+            $status         = $req_approval ? 'pending' : 'active';
+            $approved       = $req_approval ? 0 : 1;
+
+            $pdo->beginTransaction();
+
+            // Construct dynamic fields based on actual table columns
+            $itemData = [
+                'auction_code'   => $auction_code,
+                'title'          => $title,
+                'slug'           => $slug,
+                'description'    => $description,
+                'condition_type' => $condition_type,
+                'brand'          => $brand,
+                'model'          => $model,
+                'year'           => $year,
+                'starting_price' => $starting_bid,
+                'reserve_price'  => $reserve_price,
+                'current_price'  => $starting_bid,
+                'min_increment'  => $min_increment,
+                'seller_id'      => $user_id,
+                'category_id'    => $category_id,
+                'featured_image' => $featured_image,
+                'images'         => $images_json,
+                'status'         => $status,
+                'approved'       => $approved,
+                'start_time'     => $start_dt,
+                'end_time'       => $end_dt,
+            ];
+
+            // Map city and location fields safely
+            if (in_array('location_city', $tableCols, true)) {
+                $itemData['location_city'] = $city;
+            }
+            if (in_array('city', $tableCols, true)) {
+                $itemData['city'] = $city;
+            }
+            if (in_array('location_address', $tableCols, true)) {
+                $itemData['location_address'] = $area;
+            }
+            if (in_array('area', $tableCols, true)) {
+                $itemData['area'] = $area;
+            }
+
+            $insertCols = array_keys($itemData);
+            $colList = implode('`, `', $insertCols);
+            $paramList = implode(', :', $insertCols);
+
+            $insert_sql = "INSERT INTO items (`$colList`, `created_at`, `updated_at`) VALUES (:$paramList, NOW(), NOW())";
+            $stmt = $pdo->prepare($insert_sql);
+            $stmt->execute($itemData);
+            $new_item_id = (int)$pdo->lastInsertId();
+
+            // Insert into item_images table
+            $img_sql = "INSERT INTO item_images (item_id, image_path, is_primary, created_at) VALUES (:item_id, :image_path, :is_primary, NOW())";
+            $img_stmt = $pdo->prepare($img_sql);
+
+            foreach ($uploaded_images as $idx => $img_path) {
+                $is_primary = ($idx === 0) ? 1 : 0;
+                $img_stmt->execute([
+                    ':item_id'    => $new_item_id,
+                    ':image_path' => $img_path,
+                    ':is_primary' => $is_primary
+                ]);
+            }
+
+            $pdo->commit();
+            if ($req_approval) {
+                $success_msg = "Auction item submitted! It is currently pending administrative review and approval before going live. Auction Code: " . $auction_code;
+            } else {
+                $success_msg = "Auction item published successfully! Auction Code: " . $auction_code;
+            }
+            $_POST = [];
+
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $error_msg = "Database error: " . $e->getMessage();
             foreach ($raw_upload_paths as $file_path) {
                 if (file_exists($file_path)) { @unlink($file_path); }
             }
@@ -282,8 +302,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['submit_item']
     }
 }
 
-// Fetch categories for select dropdown
-$categories_res = mysqli_query($conn, "SELECT id, name FROM categories ORDER BY name ASC");
+// Fetch categories for select dropdown via PDO
+$categories = [];
+try {
+    $pdo = Database::getPdo();
+    $categories = $pdo->query("SELECT id, name FROM categories ORDER BY name ASC")->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    error_log("Failed to fetch categories: " . $e->getMessage());
+}
 
 // Default dates for form
 $default_start = date('Y-m-d\TH:i', strtotime('+5 minutes'));
@@ -296,6 +322,7 @@ include_once __DIR__ . '/../includes/header.php';
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link rel="stylesheet" href="../assets/css/ai_reserve_price.css">
 
 <style>
 /* Layout protection against Bootstrap 5 overrides */
@@ -528,12 +555,12 @@ include_once __DIR__ . '/../includes/header.php';
                             </label>
                             <select class="form-select form-select-lg" id="itemCategory" name="category_id" required>
                                 <option value="">-- Select Category --</option>
-                                <?php if ($categories_res): ?>
-                                    <?php while ($cat = mysqli_fetch_assoc($categories_res)): ?>
+                                <?php if (!empty($categories)): ?>
+                                    <?php foreach ($categories as $cat): ?>
                                         <option value="<?php echo (int)$cat['id']; ?>" <?php echo ((int)($_POST['category_id'] ?? 0) === (int)$cat['id']) ? 'selected' : ''; ?>>
                                             <?php echo htmlspecialchars($cat['name']); ?>
                                         </option>
-                                    <?php endwhile; ?>
+                                    <?php endforeach; ?>
                                 <?php endif; ?>
                             </select>
                         </div>
@@ -548,6 +575,48 @@ include_once __DIR__ . '/../includes/header.php';
                                       rows="5" 
                                       placeholder="Provide comprehensive details: physical condition, dimensions, specifications, flaws, and warranty/accessories included..." 
                                       required><?php echo htmlspecialchars($_POST['description'] ?? ''); ?></textarea>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Section 1.5: Item Specifications & Attributes -->
+                <div class="mb-4">
+                    <h5 class="fw-bold text-dark border-bottom pb-2 mb-3">
+                        <i class="bi bi-sliders text-warning me-2"></i>Specifications & Attributes <span class="text-muted fw-normal small">(Assists AI Valuation)</span>
+                    </h5>
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label for="itemCondition" class="form-label fw-semibold text-secondary small">Condition</label>
+                            <?php 
+                                $curr_cond = $_POST['condition_type'] ?? '';
+                                $cond_options = ['Brand New', 'Used - Like New', 'Used - Excellent', 'Used - Good', 'Used - Fair', 'Refurbished', 'Antique / Vintage', 'For Parts / Not Working'];
+                            ?>
+                            <select class="form-select" id="itemCondition" name="condition_type">
+                                <option value="">-- Select Condition --</option>
+                                <?php foreach ($cond_options as $cOpt): ?>
+                                    <option value="<?= htmlspecialchars($cOpt); ?>" <?= ($curr_cond === $cOpt) ? 'selected' : ''; ?>>
+                                        <?= htmlspecialchars($cOpt); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+
+                        <div class="col-md-3">
+                            <label for="itemBrand" class="form-label fw-semibold text-secondary small">Brand / Make</label>
+                            <input type="text" class="form-control" id="itemBrand" name="brand" 
+                                   value="<?= htmlspecialchars($_POST['brand'] ?? ''); ?>" placeholder="e.g. Rolex, Toyota, Apple">
+                        </div>
+
+                        <div class="col-md-3">
+                            <label for="itemModel" class="form-label fw-semibold text-secondary small">Model / Series</label>
+                            <input type="text" class="form-control" id="itemModel" name="model" 
+                                   value="<?= htmlspecialchars($_POST['model'] ?? ''); ?>" placeholder="e.g. Submariner, Land Cruiser">
+                        </div>
+
+                        <div class="col-md-3">
+                            <label for="itemYear" class="form-label fw-semibold text-secondary small">Manufacture Year</label>
+                            <input type="number" class="form-control" id="itemYear" name="year" min="1900" max="<?= date('Y') + 2; ?>" 
+                                   value="<?= htmlspecialchars((string)($_POST['year'] ?? '')); ?>" placeholder="e.g. 2022">
                         </div>
                     </div>
                 </div>
@@ -593,6 +662,17 @@ include_once __DIR__ . '/../includes/header.php';
                                        placeholder="Leave blank if none">
                             </div>
                             <div class="form-text">Lowest price you will accept to sell.</div>
+                            
+                            <!-- AI Dynamic Valuation Trigger Button -->
+                            <div class="mt-2">
+                                <button type="button" 
+                                        id="btnAiReserve" 
+                                        class="btn btn-sm btn-outline-success w-100 d-inline-flex align-items-center justify-content-center gap-1 py-1 shadow-sm"
+                                        style="border-color: #10b981; color: #047857; font-weight: 600; font-size: 0.82rem; background: #ecfdf5;">
+                                    <i class="bi bi-stars text-warning fs-6"></i>
+                                    <span>⚡ AI Suggest Reserve Price</span>
+                                </button>
+                            </div>
                         </div>
 
                         <div class="col-md-4">
@@ -612,6 +692,9 @@ include_once __DIR__ . '/../includes/header.php';
                             </div>
                             <div class="form-text">Minimum step each new bid must exceed.</div>
                         </div>
+
+                        <!-- AI Valuation Display Container -->
+                        <div class="col-12" id="aiReserveContainer" style="display: none;"></div>
                     </div>
                 </div>
 
@@ -933,6 +1016,25 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     );
     <?php endif; ?>
+});
+</script>
+
+<script src="../assets/js/ai_reserve_price.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    AiReservePrice.init({
+        triggerBtnId:      'btnAiReserve',
+        containerId:       'aiReserveContainer',
+        reserveInputId:    'reservePrice',
+        startingInputId:   'startingBid',
+        categorySelectId:  'itemCategory',
+        brandInputId:      'itemBrand',
+        modelInputId:      'itemModel',
+        yearInputId:       'itemYear',
+        conditionSelectId: 'itemCondition',
+        cityInputId:       'city',
+        apiUrl:            '../ajax/ai_reserve_price.php'
+    });
 });
 </script>
 

@@ -665,7 +665,7 @@ $standard_pills = ['All', 'Electronics', 'Antiques', 'Art', 'Vehicles', 'Collect
         <!-- Logo & Main Nav -->
         <div class="flex items-center gap-8">
             <a href="index.php" class="flex items-center gap-2 flex-shrink-0" title="Geo Auction Home">
-                <img src="assets/image/Geo-auction.png" alt="Geo Auction" class="h-10 w-auto object-contain" onerror="this.onerror=null;this.src='assets/image/geo-auction.png'">
+                <img src="assets/image/Geo-auction-logo-clean.png" alt="Geo Auction" class="h-10 w-auto object-contain" onerror="this.onerror=null;this.src='assets/image/Geo-auction.png'">
             </a>
             <nav class="hidden md:flex items-center space-x-1 font-medium text-sm text-slate-600">
                 <a href="index.php" class="px-3.5 py-2 rounded-lg hover:text-emerald-700 hover:bg-emerald-50 transition">Home</a>
@@ -1233,7 +1233,7 @@ $standard_pills = ['All', 'Electronics', 'Antiques', 'Art', 'Vehicles', 'Collect
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
         <div class="flex flex-col md:flex-row items-center justify-between gap-6">
             <div class="flex items-center gap-3">
-                <img src="assets/image/Geo-auction.png" alt="Geo Auction" class="h-8 w-auto" onerror="this.onerror=null;this.src='assets/image/geo-auction.png'">
+                <img src="assets/image/Geo-auction-logo-clean.png" alt="Geo Auction" class="h-8 w-auto" onerror="this.onerror=null;this.src='assets/image/Geo-auction.png'">
                 <span class="text-xs text-slate-500 font-medium">© <?= date('Y'); ?> GeoAuction. Real-time online bidding platform.</span>
             </div>
             <div class="flex items-center gap-6 text-xs font-semibold text-slate-600">

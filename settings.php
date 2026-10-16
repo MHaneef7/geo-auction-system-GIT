@@ -13,12 +13,6 @@ if (!isset($_SESSION['user_id'])) {
  $user_id = (int)$_SESSION['user_id'];
  $toasts = [];
 
-// CSRF Token setup
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-$csrf_token = $_SESSION['csrf_token'];
-
 // Handle backup status notification from redirect
 if (isset($_GET['backup_status'])) {
     $toasts[] = [
@@ -33,213 +27,148 @@ $current_section = $_GET['section'] ?? (isset($_GET['backup_status']) ? 'backup'
 $total_backup_size = array_sum(array_column($existing_backups, 'size_bytes'));
 $total_backup_size_formatted = formatBytes($total_backup_size);
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $submitted_token = $_POST['csrf_token'] ?? '';
-    if (!hash_equals($_SESSION['csrf_token'] ?? '', $submitted_token)) {
-        $toasts[] = ['type' => 'error', 'msg' => 'Invalid security token. Please refresh and try again.'];
-    } else {
-        $action = $_POST['action'] ?? '';
+if (isset($_POST['action']) && $_POST['action'] === 'update_profile') {
+    $name   = mysqli_real_escape_string($conn, trim($_POST['name'] ?? ''));
+    $phone  = mysqli_real_escape_string($conn, trim($_POST['phone'] ?? ''));
+    $gender = mysqli_real_escape_string($conn, trim($_POST['gender'] ?? ''));
+    $bio    = mysqli_real_escape_string($conn, trim($_POST['bio'] ?? ''));
 
-        if ($action === 'update_profile') {
-            $name   = trim($_POST['name'] ?? '');
-            $phone  = trim($_POST['phone'] ?? '');
-            $gender = trim($_POST['gender'] ?? '');
-            $bio    = trim($_POST['bio'] ?? '');
+    if (!empty($name)) {
+        $avatar_update = "";
+        $newFileName = "";
 
-            if (!empty($name)) {
-                $newFileName = "";
-                $avatar_error = false;
+        if (isset($_FILES['avatar']) && $_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
+            $fileTmpPath  = $_FILES['avatar']['tmp_name'];
+            $fileName     = $_FILES['avatar']['name'];
+            $fileSize     = $_FILES['avatar']['size'];
+            $fileExtension = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
 
-                if (isset($_FILES['avatar']) && $_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
-                    $fileTmpPath   = $_FILES['avatar']['tmp_name'];
-                    $fileName      = $_FILES['avatar']['name'];
-                    $fileSize      = $_FILES['avatar']['size'];
-                    $fileExtension = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+            $allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+            $maxSize = 2 * 1024 * 1024; // 2MB
 
-                    $allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-                    $maxSize = 2 * 1024 * 1024; // 2MB
-
-                    if (!in_array($fileExtension, $allowedExtensions)) {
-                        $toasts[] = ['type' => 'error', 'msg' => 'Invalid file type. Allowed: JPG, PNG, GIF, WebP'];
-                        $avatar_error = true;
-                    } elseif ($fileSize > $maxSize) {
-                        $toasts[] = ['type' => 'error', 'msg' => 'File too large. Maximum 2MB allowed.'];
-                        $avatar_error = true;
-                    } else {
-                        $newFileName = md5(time() . $fileName) . '.' . $fileExtension;
-                        $uploadFileDir = 'uploads/';
-                        if (!is_dir($uploadFileDir)) {
-                            mkdir($uploadFileDir, 0755, true);
-                        }
-                        $dest_path = $uploadFileDir . $newFileName;
-                        if (move_uploaded_file($fileTmpPath, $dest_path)) {
-                            // Delete old avatar
-                            if (!empty($_SESSION['user_avatar'])) {
-                                $oldFile = $uploadFileDir . $_SESSION['user_avatar'];
-                                if (file_exists($oldFile)) @unlink($oldFile);
-                            }
-                        } else {
-                            $toasts[] = ['type' => 'error', 'msg' => 'Failed to move uploaded file.'];
-                            $avatar_error = true;
-                            $newFileName = "";
-                        }
-                    }
-                }
-
-                if (!$avatar_error) {
-                    if (!empty($newFileName)) {
-                        $stmt = mysqli_prepare($conn, "UPDATE `users` SET `name` = ?, `phone` = ?, `gender` = ?, `bio` = ?, `avatar` = ? WHERE `id` = ?");
-                        mysqli_stmt_bind_param($stmt, "sssssi", $name, $phone, $gender, $bio, $newFileName, $user_id);
-                    } else {
-                        $stmt = mysqli_prepare($conn, "UPDATE `users` SET `name` = ?, `phone` = ?, `gender` = ?, `bio` = ? WHERE `id` = ?");
-                        mysqli_stmt_bind_param($stmt, "ssssi", $name, $phone, $gender, $bio, $user_id);
-                    }
-
-                    if ($stmt && mysqli_stmt_execute($stmt)) {
-                        $_SESSION['user_name'] = $name;
-                        if (!empty($newFileName)) {
-                            $_SESSION['user_avatar'] = $newFileName;
-                        }
-                        $toasts[] = ['type' => 'success', 'msg' => 'Profile updated successfully!'];
-                        mysqli_stmt_close($stmt);
-                    } else {
-                        $toasts[] = ['type' => 'error', 'msg' => 'Database error: ' . mysqli_error($conn)];
-                    }
-                }
+            if (!in_array($fileExtension, $allowedExtensions)) {
+                $toasts[] = ['type' => 'error', 'msg' => 'Invalid file type. Allowed: JPG, PNG, GIF, WebP'];
+            } elseif ($fileSize > $maxSize) {
+                $toasts[] = ['type' => 'error', 'msg' => 'File too large. Maximum 2MB allowed.'];
             } else {
-                $toasts[] = ['type' => 'error', 'msg' => 'Name is required.'];
-            }
-        }
-
-        if ($action === 'change_password') {
-            $current      = $_POST['current_password'] ?? '';
-            $new_pass     = $_POST['new_password'] ?? '';
-            $confirm_pass = $_POST['confirm_password'] ?? '';
-
-            $stmt = mysqli_prepare($conn, "SELECT `password` FROM `users` WHERE `id` = ? LIMIT 1");
-            mysqli_stmt_bind_param($stmt, "i", $user_id);
-            mysqli_stmt_execute($stmt);
-            $res = mysqli_stmt_get_result($stmt);
-            $row = mysqli_fetch_assoc($res);
-            $hashed = $row['password'] ?? '';
-            mysqli_stmt_close($stmt);
-
-            if (empty($current) || empty($new_pass) || empty($confirm_pass)) {
-                $toasts[] = ['type' => 'error', 'msg' => 'All password fields are required.'];
-            } elseif (!password_verify($current, $hashed)) {
-                $toasts[] = ['type' => 'error', 'msg' => 'Current password is incorrect.'];
-            } elseif (strlen($new_pass) < 8) {
-                $toasts[] = ['type' => 'error', 'msg' => 'New password must be at least 8 characters.'];
-            } elseif ($new_pass !== $confirm_pass) {
-                $toasts[] = ['type' => 'error', 'msg' => 'New passwords do not match.'];
-            } else {
-                $new_hashed = password_hash($new_pass, PASSWORD_DEFAULT);
-                $up_stmt = mysqli_prepare($conn, "UPDATE `users` SET `password` = ? WHERE `id` = ?");
-                mysqli_stmt_bind_param($up_stmt, "si", $new_hashed, $user_id);
-                if (mysqli_stmt_execute($up_stmt)) {
-                    $toasts[] = ['type' => 'success', 'msg' => 'Password changed successfully!'];
+                $newFileName = md5(time() . $fileName) . '.' . $fileExtension;
+                $uploadFileDir = 'uploads/';
+                if (!is_dir($uploadFileDir)) {
+                    mkdir($uploadFileDir, 0755, true);
+                }
+                $dest_path = $uploadFileDir . $newFileName;
+                if (move_uploaded_file($fileTmpPath, $dest_path)) {
+                    // Delete old avatar
+                    if (!empty($_SESSION['user_avatar'])) {
+                        $oldFile = $uploadFileDir . $_SESSION['user_avatar'];
+                        if (file_exists($oldFile)) unlink($oldFile);
+                    }
+                    $avatar_update = ", `avatar` = '" . mysqli_real_escape_string($conn, $newFileName) . "'";
                 } else {
-                    $toasts[] = ['type' => 'error', 'msg' => 'Failed to update password.'];
+                    $toasts[] = ['type' => 'error', 'msg' => 'Failed to move uploaded file.'];
                 }
-                mysqli_stmt_close($up_stmt);
             }
         }
 
-        // ─── Handle Notification Preferences ───
-        if ($action === 'update_notifications') {
-            $email_bids       = isset($_POST['email_bids']) ? 1 : 0;
-            $email_outbid     = isset($_POST['email_outbid']) ? 1 : 0;
-            $email_won        = isset($_POST['email_won']) ? 1 : 0;
-            $email_newsletter = isset($_POST['email_newsletter']) ? 1 : 0;
-            $sms_bids         = isset($_POST['sms_bids']) ? 1 : 0;
+        $sql = "UPDATE `users` SET `name` = '$name', `phone` = '$phone', `gender` = '$gender', `bio` = '$bio'" . $avatar_update . " WHERE `id` = $user_id";
 
-            // Check if notification row exists
-            $chk_stmt = mysqli_prepare($conn, "SELECT `id` FROM `user_notifications` WHERE `user_id` = ? LIMIT 1");
-            mysqli_stmt_bind_param($chk_stmt, "i", $user_id);
-            mysqli_stmt_execute($chk_stmt);
-            $check = mysqli_stmt_get_result($chk_stmt);
-            $exists = ($check && mysqli_num_rows($check) > 0);
-            mysqli_stmt_close($chk_stmt);
-
-            $success = false;
-            if ($exists) {
-                $up_n_stmt = mysqli_prepare($conn, "UPDATE `user_notifications` SET `email_bids` = ?, `email_outbid` = ?, `email_won` = ?, `email_newsletter` = ?, `sms_bids` = ? WHERE `user_id` = ?");
-                mysqli_stmt_bind_param($up_n_stmt, "iiiiii", $email_bids, $email_outbid, $email_won, $email_newsletter, $sms_bids, $user_id);
-                $success = mysqli_stmt_execute($up_n_stmt);
-                mysqli_stmt_close($up_n_stmt);
-            } else {
-                $ins_n_stmt = mysqli_prepare($conn, "INSERT INTO `user_notifications` (`user_id`, `email_bids`, `email_outbid`, `email_won`, `email_newsletter`, `sms_bids`) VALUES (?, ?, ?, ?, ?, ?)");
-                mysqli_stmt_bind_param($ins_n_stmt, "iiiiii", $user_id, $email_bids, $email_outbid, $email_won, $email_newsletter, $sms_bids);
-                $success = mysqli_stmt_execute($ins_n_stmt);
-                mysqli_stmt_close($ins_n_stmt);
+        if (mysqli_query($conn, $sql)) {
+            $_SESSION['user_name'] = $name;
+            if (!empty($newFileName)) {
+                $_SESSION['user_avatar'] = $newFileName;
             }
-
-            if ($success) {
-                $toasts[] = ['type' => 'success', 'msg' => 'Notification preferences saved!'];
-            } else {
-                $toasts[] = ['type' => 'error', 'msg' => 'Failed to save preferences.'];
-            }
+            $toasts[] = ['type' => 'success', 'msg' => 'Profile updated successfully!'];
+        } else {
+            $toasts[] = ['type' => 'error', 'msg' => 'Database error: ' . mysqli_error($conn)];
         }
+    } else {
+        $toasts[] = ['type' => 'error', 'msg' => 'Name is required.'];
+    }
+}
 
-        // ─── Handle Account Deletion ───
-        if ($action === 'delete_account') {
-            $confirm_text = trim($_POST['delete_confirm'] ?? '');
-            if ($confirm_text === 'DELETE') {
-                // Delete avatar file
-                if (!empty($_SESSION['user_avatar'])) {
-                    $oldFile = 'uploads/' . $_SESSION['user_avatar'];
-                    if (file_exists($oldFile)) @unlink($oldFile);
-                }
-                $del_n_stmt = mysqli_prepare($conn, "DELETE FROM `user_notifications` WHERE `user_id` = ?");
-                if ($del_n_stmt) {
-                    mysqli_stmt_bind_param($del_n_stmt, "i", $user_id);
-                    mysqli_stmt_execute($del_n_stmt);
-                    mysqli_stmt_close($del_n_stmt);
-                }
-                $del_u_stmt = mysqli_prepare($conn, "DELETE FROM `users` WHERE `id` = ?");
-                if ($del_u_stmt) {
-                    mysqli_stmt_bind_param($del_u_stmt, "i", $user_id);
-                    mysqli_stmt_execute($del_u_stmt);
-                    mysqli_stmt_close($del_u_stmt);
-                }
-                session_destroy();
-                header("Location: index.php?msg=account_deleted");
-                exit();
-            } else {
-                $toasts[] = ['type' => 'error', 'msg' => 'Please type DELETE to confirm.'];
-            }
+if (isset($_POST['action']) && $_POST['action'] === 'change_password') {
+    $current      = $_POST['current_password'] ?? '';
+    $new_pass     = $_POST['new_password'] ?? '';
+    $confirm_pass = $_POST['confirm_password'] ?? '';
+
+    $res = mysqli_query($conn, "SELECT `password` FROM `users` WHERE `id` = $user_id LIMIT 1");
+    $row = mysqli_fetch_assoc($res);
+    $hashed = $row['password'] ?? '';
+
+    if (empty($current) || empty($new_pass) || empty($confirm_pass)) {
+        $toasts[] = ['type' => 'error', 'msg' => 'All password fields are required.'];
+    } elseif (!password_verify($current, $hashed)) {
+        $toasts[] = ['type' => 'error', 'msg' => 'Current password is incorrect.'];
+    } elseif (strlen($new_pass) < 8) {
+        $toasts[] = ['type' => 'error', 'msg' => 'New password must be at least 8 characters.'];
+    } elseif ($new_pass !== $confirm_pass) {
+        $toasts[] = ['type' => 'error', 'msg' => 'New passwords do not match.'];
+    } else {
+        $new_hashed = password_hash($new_pass, PASSWORD_DEFAULT);
+        if (mysqli_query($conn, "UPDATE `users` SET `password` = '$new_hashed' WHERE `id` = $user_id")) {
+            $toasts[] = ['type' => 'success', 'msg' => 'Password changed successfully!'];
+        } else {
+            $toasts[] = ['type' => 'error', 'msg' => 'Failed to update password.'];
         }
+    }
+}
+
+// ─── Handle Notification Preferences ───
+if (isset($_POST['action']) && $_POST['action'] === 'update_notifications') {
+    $email_bids      = isset($_POST['email_bids']) ? 1 : 0;
+    $email_outbid    = isset($_POST['email_outbid']) ? 1 : 0;
+    $email_won       = isset($_POST['email_won']) ? 1 : 0;
+    $email_newsletter = isset($_POST['email_newsletter']) ? 1 : 0;
+    $sms_bids        = isset($_POST['sms_bids']) ? 1 : 0;
+
+    // Check if notification row exists
+    $check = mysqli_query($conn, "SELECT `id` FROM `user_notifications` WHERE `user_id` = $user_id LIMIT 1");
+    if (mysqli_num_rows($check) > 0) {
+        $sql = "UPDATE `user_notifications` SET  `email_bids` = $email_bids, `email_outbid` = $email_outbid, 
+            `email_won` = $email_won, `email_newsletter` = $email_newsletter,
+            `sms_bids` = $sms_bids WHERE `user_id` = $user_id";
+    } else {
+        $sql = "INSERT INTO `user_notifications` 
+            (`user_id`, `email_bids`, `email_outbid`, `email_won`, `email_newsletter`, `sms_bids`) 
+            VALUES ($user_id, $email_bids, $email_outbid, $email_won, $email_newsletter, $sms_bids)";
+    }
+
+    if (mysqli_query($conn, $sql)) {
+        $toasts[] = ['type' => 'success', 'msg' => 'Notification preferences saved!'];
+    } else {
+        $toasts[] = ['type' => 'error', 'msg' => 'Failed to save preferences.'];
+    }
+}
+
+// ─── Handle Account Deletion ───
+if (isset($_POST['action']) && $_POST['action'] === 'delete_account') {
+    $confirm_text = trim($_POST['delete_confirm'] ?? '');
+    if ($confirm_text === 'DELETE') {
+        // Delete avatar file
+        if (!empty($_SESSION['user_avatar'])) {
+            $oldFile = 'uploads/' . $_SESSION['user_avatar'];
+            if (file_exists($oldFile)) unlink($oldFile);
+        }
+        mysqli_query($conn, "DELETE FROM `user_notifications` WHERE `user_id` = $user_id");
+        mysqli_query($conn, "DELETE FROM `users` WHERE `id` = $user_id");
+        session_destroy();
+        header("Location: index.php?msg=account_deleted");
+        exit();
+    } else {
+        $toasts[] = ['type' => 'error', 'msg' => 'Please type DELETE to confirm.'];
     }
 }
 
 // ─── Fetch User Data ───
-$user_stmt = mysqli_prepare($conn, "SELECT `id`, `name`, `email`, `phone`, `role`, `avatar`, `bio`, `status`, `gender`, `created_at` FROM `users` WHERE `id` = ? LIMIT 1");
-$user = ['name' => '', 'email' => '', 'phone' => '', 'avatar' => '', 'bio' => '', 'gender' => '', 'created_at' => ''];
-if ($user_stmt) {
-    mysqli_stmt_bind_param($user_stmt, "i", $user_id);
-    mysqli_stmt_execute($user_stmt);
-    $user_res = mysqli_stmt_get_result($user_stmt);
-    if ($user_res && mysqli_num_rows($user_res) > 0) {
-        $user = mysqli_fetch_assoc($user_res);
-    }
-    mysqli_stmt_close($user_stmt);
-}
+ $user_res = mysqli_query($conn, "SELECT `id`, `name`, `email`, `phone`, `role`, `avatar`, `bio`, `status`, `gender`, `created_at` FROM `users` WHERE `id` = $user_id LIMIT 1");
+ $user = ($user_res && mysqli_num_rows($user_res) > 0) ? mysqli_fetch_assoc($user_res) : ['name' => '', 'email' => '', 'phone' => '', 'avatar' => '', 'bio' => '', 'gender' => '', 'created_at' => ''];
 
 // ─── Fetch Notification Preferences ───
-$notif_stmt = mysqli_prepare($conn, "SELECT * FROM `user_notifications` WHERE `user_id` = ? LIMIT 1");
-$notif = [
+ $notif_res = mysqli_query($conn, "SELECT * FROM `user_notifications` WHERE `user_id` = $user_id LIMIT 1");
+ $notif = ($notif_res && mysqli_num_rows($notif_res) > 0) ? mysqli_fetch_assoc($notif_res) : [
     'email_bids' => 1, 'email_outbid' => 1, 'email_won' => 1, 
     'email_newsletter' => 0, 'sms_bids' => 0
 ];
-if ($notif_stmt) {
-    mysqli_stmt_bind_param($notif_stmt, "i", $user_id);
-    mysqli_stmt_execute($notif_stmt);
-    $notif_res = mysqli_stmt_get_result($notif_stmt);
-    if ($notif_res && mysqli_num_rows($notif_res) > 0) {
-        $notif = mysqli_fetch_assoc($notif_res);
-    }
-    mysqli_stmt_close($notif_stmt);
-}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -1780,7 +1709,6 @@ if ($notif_stmt) {
         <h3 style="color: var(--danger);">Delete Account</h3>
         <p>This action is permanent and cannot be undone. All your data, bids, and listings will be permanently removed.</p>
         <form method="POST" action="settings.php">
-            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
             <input type="hidden" name="action" value="delete_account">
             <div class="form-group delete-confirm">
                 <label>Type <strong>DELETE</strong> to confirm</label>
@@ -1896,7 +1824,6 @@ if ($notif_stmt) {
         <!-- ═══ Profile Section ═══ -->
         <div class="settings-section <?= $current_section === 'profile' ? 'active' : '' ?>" id="section-profile">
             <form method="POST" action="settings.php" enctype="multipart/form-data" id="profileForm">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                 <input type="hidden" name="action" value="update_profile">
 
                 <div class="section-block">
@@ -1976,7 +1903,6 @@ if ($notif_stmt) {
                 <div class="section-desc">Ensure your account is using a strong, unique password.</div>
 
                 <form method="POST" action="settings.php" id="passwordForm">
-                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <input type="hidden" name="action" value="change_password">
 
                     <div class="form-grid">
@@ -2037,7 +1963,6 @@ if ($notif_stmt) {
         <!-- ═══ Notifications Section ═══ -->
         <div class="settings-section <?= $current_section === 'notifications' ? 'active' : '' ?>" id="section-notifications">
             <form method="POST" action="settings.php">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                 <input type="hidden" name="action" value="update_notifications">
 
                 <div class="section-block">

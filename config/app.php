@@ -113,8 +113,8 @@ return [
     */
 
     'currency' => [
-        'symbol' => '$',
-        'code' => 'USD',
+        'symbol' => 'Rs. ',
+        'code' => 'PKR',
         'precision' => 2,
     ],
 

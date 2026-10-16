@@ -23,7 +23,7 @@ if (!is_logged_in()) {
     exit();
 }
 
-$currentUserId = (int)($_SESSION['user_id'] ?? ($_SESSION['admin_id'] ?? 0));
+$currentUserId = (int)($_SESSION['user_id'] ?? 0);
 if ($currentUserId <= 0) {
     http_response_code(401);
     echo json_encode(['success' => false, 'message' => 'Invalid session.']);

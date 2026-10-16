@@ -38,15 +38,15 @@
     $user_avatar   = $_SESSION['user_avatar'] ?? ($_SESSION['avatar'] ?? '');
     $user_initials = strtoupper(substr($user_name, 0, 2));
     $user_balance = 0.00;
-    if ($is_logged && isset($conn) && $conn instanceof mysqli && !$conn->connect_error) {
+    if ($is_logged) {
         $_uid_hdr = (int)$_SESSION['user_id'];
-        $stmt_bal = mysqli_prepare($conn, "SELECT balance FROM users WHERE id = ?");
-        if ($stmt_bal) {
-            mysqli_stmt_bind_param($stmt_bal, "i", $_uid_hdr);
-            mysqli_stmt_execute($stmt_bal);
-            $balance_res = mysqli_stmt_get_result($stmt_bal);
-            $user_balance = (float)(mysqli_fetch_assoc($balance_res)['balance'] ?? 0);
-            mysqli_stmt_close($stmt_bal);
+        try {
+            $pdo_hdr = Database::getPdo();
+            $stmt_bal = $pdo_hdr->prepare("SELECT balance FROM users WHERE id = :id LIMIT 1");
+            $stmt_bal->execute([':id' => $_uid_hdr]);
+            $user_balance = (float)($stmt_bal->fetchColumn() ?? 0.0);
+        } catch (\Throwable $e) {
+            $user_balance = 0.00;
         }
     }
 ?>
@@ -56,6 +56,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Geo Auction System</title>
+    <meta name="csrf-token" content="<?php echo htmlspecialchars(csrf_token(), ENT_QUOTES, 'UTF-8'); ?>">
     <!-- Immediate Theme Initialization Script (Prevents FOUC / Flashing) -->
     <script>
         (function() {
@@ -69,7 +70,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="../assets/css/main.css">
+    <link rel="stylesheet" href="<?= $root_path; ?>assets/css/main.css">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 
     <style>
@@ -228,6 +229,13 @@
             align-items: center;
             gap: 10px;
             flex-shrink: 0;
+        }
+        #logo {
+            height: 40px !important;
+            max-height: 44px !important;
+            width: auto !important;
+            object-fit: contain !important;
+            display: block !important;
         }
 
         .nav-search {
@@ -554,7 +562,7 @@
             <i class="fa-solid fa-bars"></i>
         </button>
         <a href="<?php echo $root_path; ?>dashboard.php" class="nav-brand">
-            <img id="logo" src="<?php echo $root_path; ?>assets/image/Geo-auction.png" alt="Geo Auction Logo" height="38" style="height: 180px; object-fit:contain;" onerror="this.onerror=null; this.src='<?php echo $root_path; ?>assets/image/geo-auction.png';">
+            <img id="logo" src="<?php echo $root_path; ?>assets/image/Geo-auction-logo-clean.png" alt="Geo Auction Logo" style="height: 40px; width: auto; object-fit: contain;" onerror="this.onerror=null; this.src='<?php echo $root_path; ?>assets/image/Geo-auction.png';">
         </a> 
         <div class="nav-search">
             <form action="<?php echo $root_path; ?>search.php" method="GET">
@@ -607,7 +615,7 @@
                             <div style="padding:24px;text-align:center;color:var(--text-muted);font-size:12px;">Loading notifications...</div>
                         </div>
                         <div style="padding:10px 16px;border-top:1px solid var(--border);text-align:center;background:rgba(0,0,0,0.01);">
-                            <a href="<?php echo $root_path; ?>notifications.php" style="font-size:12px;font-weight:700;color:var(--green);text-decoration:none;">
+                            <a href="<?php echo $user_path; ?>notifications.php" style="font-size:12px;font-weight:700;color:var(--green);text-decoration:none;">
                                 View All Notifications →
                             </a>
                         </div>
@@ -646,8 +654,11 @@
                                 <i class="fa-solid fa-plus-circle"></i> + Add New Item
                             </a>
                         <?php endif; ?>
-                        <a href="<?php echo $user_path; ?>profile.php" class="profile-dropdown-item">
+                        <a href="<?php echo $root_path; ?>profile.php" class="profile-dropdown-item">
                             <i class="fa-solid fa-user"></i> Profile
+                        </a>
+                        <a href="<?php echo $user_path; ?>settings.php" class="profile-dropdown-item">
+                            <i class="fa-solid fa-gear"></i> Account Settings
                         </a>
                         <a href="<?php echo $user_path; ?>dashboard.php" class="profile-dropdown-item">
                             <i class="fa-solid fa-house"></i> User Dashboard
@@ -656,6 +667,9 @@
                         <?php if ($is_admin): ?>
                             <a href="<?php echo $admin_path; ?>dashboard.php" class="profile-dropdown-item" style="color: #fca5a5;">
                                 <i class="fa-solid fa-user-shield"></i> Admin Panel
+                            </a>
+                            <a href="<?php echo $admin_path; ?>settings.php" class="profile-dropdown-item" style="color: #fca5a5;">
+                                <i class="fa-solid fa-sliders"></i> Platform Settings
                             </a>
                         <?php endif; ?>
                         <a href="<?php echo $root_path; ?>logout.php" class="profile-dropdown-item logout">
@@ -696,6 +710,9 @@
                     <a href="<?php echo $user_path; ?>my_auctions.php" class="sidebar-link">
                         <i class="fa-solid fa-box-archive"></i> My Listings
                     </a>
+                    <a href="<?php echo $root_path; ?>auction/settings.php" class="sidebar-link">
+                        <i class="fa-solid fa-sliders"></i> Auction Settings
+                    </a>
                 </div>
                 <div class="sidebar-section">
                     <div class="sidebar-label">Wallet</div>
@@ -715,6 +732,9 @@
                 <a href="<?php echo $admin_path; ?>dashboard.php" class="sidebar-link" style="color:#f87171;">
                     <i class="fa-solid fa-user-shield"></i> Admin Dashboard
                 </a>
+                <a href="<?php echo $admin_path; ?>settings.php" class="sidebar-link" style="color:#f87171;">
+                    <i class="fa-solid fa-sliders"></i> Platform Settings
+                </a>
                 <a href="<?php echo $admin_path; ?>setting.php" class="sidebar-link">
                     <i class="fa-solid fa-database"></i> Database & Backup
                 </a>
@@ -724,8 +744,11 @@
             <div class="sidebar-section">
                 <div class="sidebar-label">Account</div>
                 <?php if ($is_logged): ?>
-                    <a href="<?php echo $user_path; ?>profile.php" class="sidebar-link">
+                    <a href="<?php echo $root_path; ?>profile.php" class="sidebar-link">
                         <i class="fa-solid fa-user"></i> My Profile
+                    </a>
+                    <a href="<?php echo $user_path; ?>settings.php" class="sidebar-link">
+                        <i class="fa-solid fa-gear"></i> Account Settings
                     </a>
                     <a href="<?php echo $root_path; ?>settings.php?section=backup" class="sidebar-link">
                         <i class="fa-solid fa-database"></i> Database Backup
@@ -880,18 +903,14 @@
             }
 
             async function handleNotificationClick(nid, link) {
-                const root = '<?php echo $root_path; ?>';
                 try {
+                    const root = '<?php echo $root_path; ?>';
                     await fetch(root + 'mark_as_read.php?notification_id=' + nid);
                     loadHeaderBadges();
                 } catch (e) {}
 
                 if (link && link.trim() !== '') {
-                    let targetUrl = link.trim();
-                    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://') && !targetUrl.startsWith('/')) {
-                        targetUrl = root + targetUrl;
-                    }
-                    window.location.href = targetUrl;
+                    window.location.href = link;
                 } else {
                     loadHeaderNotifications();
                 }

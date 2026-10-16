@@ -1,33 +1,18 @@
 <?php
 session_start();
-include_once __DIR__ . "/../includes/database.php";
+require_once __DIR__ . "/../includes/auth.php";
+require_once __DIR__ . "/../includes/database.php";
 
-if ($conn->connect_error) {
-    die("Database Connection Failed: " . $conn->connect_error);
-}
+require_login('../login.php?redirect=user/my_bids.php');
 
-/*
-|--------------------------------------------------------------------------
-| Check Login
-|--------------------------------------------------------------------------
-*/
-if (!isset($_SESSION['user_id'])) {
-    header("Location: ../login.php");
-    exit;
-}
+$user_id = (int)($_SESSION['user_id'] ?? 0);
 
-$user_id = (int) $_SESSION['user_id'];
-
-/*
-|--------------------------------------------------------------------------
-| Get User Bids (Updated with schema columns)
-|--------------------------------------------------------------------------
-*/
-$sql = "
+$pdo = Database::getPdo();
+$stmt = $pdo->prepare("
     SELECT 
         b.id,
         b.item_id,
-        b.bid_amount AS bid_amount,
+        b.bid_amount,
         b.is_winning,
         b.bid_status,
         b.created_at,
@@ -35,21 +20,12 @@ $sql = "
         i.current_price
     FROM bids AS b
     INNER JOIN items AS i ON b.item_id = i.id
-    WHERE b.user_id = ?
+    WHERE b.user_id = :uid
     ORDER BY b.created_at DESC
-";
+");
+$stmt->execute([':uid' => $user_id]);
+$bidsList = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-$stmt = mysqli_prepare($conn, $sql);
-if (!$stmt) {
-    die("Query Prepare Error: " . mysqli_error($conn));
-}
-mysqli_stmt_bind_param($stmt, "i", $user_id);
-mysqli_stmt_execute($stmt);
-$bids = mysqli_stmt_get_result($stmt);
-
-if (!$bids) {
-    die("Query Error: " . mysqli_error($conn));
-}
 include_once __DIR__ . "/../includes/header.php";
 ?>
 
@@ -205,7 +181,7 @@ body {
 }
 </style>
 
-<div class="main-content">
+<div class="content-container">
     <div class="card">
         <div class="page-header">
             <h2><i class="fas fa-gavel"></i> My Bid History</h2>
@@ -223,15 +199,15 @@ body {
                     </tr>
                 </thead>
                 <tbody>
-                <?php if (mysqli_num_rows($bids) > 0): ?>
-                    <?php while ($row = mysqli_fetch_assoc($bids)): ?>
+                <?php if (!empty($bidsList)): ?>
+                    <?php foreach ($bidsList as $row): ?>
                         <?php 
                             // Database ke 'is_winning' field ya current price comparison ko use kiya gaya hai
                             $is_winning = ($row['is_winning'] == 1 || (float)$row['bid_amount'] >= (float)$row['current_price']);
                         ?>
                         <tr>
                             <td class="td-item-title">
-                                <a href="../live_auction.php?id=<?php echo (int)$row['item_id']; ?>" class="font-bold hover:underline">
+                                <a href="../item.php?id=<?php echo (int)$row['item_id']; ?>">
                                     <?php echo htmlspecialchars($row['title'] ?? 'Item #' . $row['item_id']); ?>
                                 </a>
                             </td>
@@ -256,7 +232,7 @@ body {
                                 <?php echo date('d M Y, h:i A', strtotime($row['created_at'])); ?>
                             </td>
                         </tr>
-                    <?php endwhile; ?>
+                    <?php endforeach; ?>
                 <?php else: ?>
                     <tr>
                         <td colspan="5">

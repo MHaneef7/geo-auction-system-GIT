@@ -22,6 +22,29 @@ include_once __DIR__ . '/../includes/auth.php';
 
 require_admin('../index.php');
 
+// Ensure user profile & KYC schema compatibility
+try {
+    $pdo = Database::getPdo();
+    $cols = $pdo->query("SHOW COLUMNS FROM users")->fetchAll(PDO::FETCH_COLUMN);
+    if (!in_array('username', $cols, true)) {
+        $pdo->exec("ALTER TABLE `users` ADD COLUMN `username` VARCHAR(50) NULL");
+    }
+    if (!in_array('kyc_tier', $cols, true)) {
+        $pdo->exec("ALTER TABLE `users` ADD COLUMN `kyc_tier` VARCHAR(30) NOT NULL DEFAULT 'verified_bidder'");
+    }
+    if (!in_array('kyc_verified_at', $cols, true)) {
+        $pdo->exec("ALTER TABLE `users` ADD COLUMN `kyc_verified_at` TIMESTAMP NULL DEFAULT NULL");
+    }
+    if (!in_array('shipping_address', $cols, true)) {
+        $pdo->exec("ALTER TABLE `users` ADD COLUMN `shipping_address` TEXT NULL");
+    }
+    if (!in_array('cnic_tax_id', $cols, true)) {
+        $pdo->exec("ALTER TABLE `users` ADD COLUMN `cnic_tax_id` VARCHAR(50) NULL");
+    }
+} catch (Throwable $e) {
+    error_log("Schema sync for users table: " . $e->getMessage());
+}
+
 $current_admin_id = (int)($_SESSION['user_id'] ?? 0);
 $msg      = '';
 $msg_type = 'success'; // 'success' or 'danger'
@@ -662,10 +685,12 @@ if (isset($_GET['edit'])) {
         <a href="categories.php"><i class="fas fa-tags me-2"></i> Categories</a>
         <a href="items.php"><i class="fas fa-box-open me-2"></i> Items</a>
         <a href="bids.php"><i class="fas fa-hand-holding-usd me-2"></i> Bids</a>
+        <a href="payments.php"><i class="fas fa-credit-card me-2"></i> Payments</a>
         
         <div class="nav-category">System</div>
-        <a href="reports.php"><i class="fas fa-chart-line me-2"></i> Reports</a>
+        <a href="settings.php"><i class="fas fa-sliders-h me-2"></i> Platform Settings</a>
         <a href="setting.php"><i class="fas fa-database me-2"></i> Database & Backup</a>
+        <a href="reports.php"><i class="fas fa-chart-line me-2"></i> Reports</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>
     </div>
 

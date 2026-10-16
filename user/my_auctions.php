@@ -32,10 +32,11 @@ $view_mode = isset($_GET['view']) && $_GET['view'] === 'table' ? 'table' : 'card
 $filter    = isset($_GET['status']) ? trim($_GET['status']) : '';
 $search    = isset($_GET['search']) ? trim($_GET['search']) : '';
 
+$pdo = Database::getPdo();
+
 // Build Query
-$where_clauses = ["i.seller_id = ?"];
-$bind_params   = [$user_id];
-$bind_types    = "i";
+$where_clauses = ["i.seller_id = :seller_id"];
+$params = [':seller_id' => $user_id];
 
 if ($filter === 'deleted') {
     $where_clauses[] = "i.is_deleted = 1";
@@ -48,11 +49,10 @@ if ($filter === 'deleted') {
 }
 
 if ($search !== '') {
-    $where_clauses[] = "(i.title LIKE ? OR i.auction_code LIKE ?)";
-    $like = '%' . $search . '%';
-    $bind_params[] = $like;
-    $bind_params[] = $like;
-    $bind_types   .= "ss";
+    $where_clauses[] = "(i.title LIKE :s1 OR i.auction_code LIKE :s2)";
+    $term = '%' . $search . '%';
+    $params[':s1'] = $term;
+    $params[':s2'] = $term;
 }
 
 $where_sql = implode(' AND ', $where_clauses);
@@ -71,35 +71,26 @@ $query = "
     ORDER BY i.is_deleted ASC, i.id DESC
 ";
 
-$stmt = mysqli_prepare($conn, $query);
-mysqli_stmt_bind_param($stmt, $bind_types, ...$bind_params);
-mysqli_stmt_execute($stmt);
-$auctions = mysqli_stmt_get_result($stmt);
+$stmt = $pdo->prepare($query);
+$stmt->execute($params);
+$auctionsList = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Counts for filter tabs
-$cnt_total_stmt = mysqli_prepare($conn, "SELECT COUNT(*) AS c FROM items WHERE seller_id = ?");
-mysqli_stmt_bind_param($cnt_total_stmt, "i", $user_id);
-mysqli_stmt_execute($cnt_total_stmt);
-$cnt_total = (int)(mysqli_fetch_assoc(mysqli_stmt_get_result($cnt_total_stmt))['c'] ?? 0);
-mysqli_stmt_close($cnt_total_stmt);
+$cnt_total_stmt = $pdo->prepare("SELECT COUNT(*) FROM items WHERE seller_id = :uid");
+$cnt_total_stmt->execute([':uid' => $user_id]);
+$cnt_total = (int)$cnt_total_stmt->fetchColumn();
 
-$cnt_active_stmt = mysqli_prepare($conn, "SELECT COUNT(*) AS c FROM items WHERE seller_id = ? AND status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL) AND (end_time IS NULL OR end_time > NOW())");
-mysqli_stmt_bind_param($cnt_active_stmt, "i", $user_id);
-mysqli_stmt_execute($cnt_active_stmt);
-$cnt_active = (int)(mysqli_fetch_assoc(mysqli_stmt_get_result($cnt_active_stmt))['c'] ?? 0);
-mysqli_stmt_close($cnt_active_stmt);
+$cnt_active_stmt = $pdo->prepare("SELECT COUNT(*) FROM items WHERE seller_id = :uid AND status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL) AND (end_time IS NULL OR end_time > NOW())");
+$cnt_active_stmt->execute([':uid' => $user_id]);
+$cnt_active = (int)$cnt_active_stmt->fetchColumn();
 
-$cnt_sold_stmt = mysqli_prepare($conn, "SELECT COUNT(*) AS c FROM items WHERE seller_id = ? AND status = 'sold' AND (is_deleted = 0 OR is_deleted IS NULL)");
-mysqli_stmt_bind_param($cnt_sold_stmt, "i", $user_id);
-mysqli_stmt_execute($cnt_sold_stmt);
-$cnt_sold = (int)(mysqli_fetch_assoc(mysqli_stmt_get_result($cnt_sold_stmt))['c'] ?? 0);
-mysqli_stmt_close($cnt_sold_stmt);
+$cnt_sold_stmt = $pdo->prepare("SELECT COUNT(*) FROM items WHERE seller_id = :uid AND status = 'sold' AND (is_deleted = 0 OR is_deleted IS NULL)");
+$cnt_sold_stmt->execute([':uid' => $user_id]);
+$cnt_sold = (int)$cnt_sold_stmt->fetchColumn();
 
-$cnt_del_stmt = mysqli_prepare($conn, "SELECT COUNT(*) AS c FROM items WHERE seller_id = ? AND is_deleted = 1");
-mysqli_stmt_bind_param($cnt_del_stmt, "i", $user_id);
-mysqli_stmt_execute($cnt_del_stmt);
-$cnt_deleted = (int)(mysqli_fetch_assoc(mysqli_stmt_get_result($cnt_del_stmt))['c'] ?? 0);
-mysqli_stmt_close($cnt_del_stmt);
+$cnt_del_stmt = $pdo->prepare("SELECT COUNT(*) FROM items WHERE seller_id = :uid AND is_deleted = 1");
+$cnt_del_stmt->execute([':uid' => $user_id]);
+$cnt_deleted = (int)$cnt_del_stmt->fetchColumn();
 
 include_once __DIR__ . '/../includes/header.php';
 ?>
@@ -415,12 +406,12 @@ include_once __DIR__ . '/../includes/header.php';
     </div>
 
     <!-- MAIN CONTENT VIEW -->
-    <?php if ($auctions && mysqli_num_rows($auctions) > 0): ?>
+    <?php if (!empty($auctionsList)): ?>
         <?php if ($view_mode === 'cards'): ?>
             <!-- UNIFIED CARDS VIEW -->
             <div class="seller-cards-grid">
                 <?php 
-                while ($row = mysqli_fetch_assoc($auctions)) {
+                foreach ($auctionsList as $row) {
                     render_unified_item_card($row, 'seller', $user_id, ['is_subfolder' => true]);
                 }
                 ?>
@@ -441,7 +432,7 @@ include_once __DIR__ . '/../includes/header.php';
                         </tr>
                     </thead>
                     <tbody>
-                        <?php while ($row = mysqli_fetch_assoc($auctions)): 
+                        <?php foreach ($auctionsList as $row): 
                             $is_del = !empty($row['is_deleted']);
                         ?>
                         <tr class="<?php echo $is_del ? 'row-deleted' : ''; ?>">
@@ -456,19 +447,19 @@ include_once __DIR__ . '/../includes/header.php';
                                     <div>
                                         <div style="font-weight: 700;" class="<?php echo $is_del ? 'strikethrough-text' : ''; ?>">
                                             <a href="../live_auction.php?id=<?php echo $row['id']; ?>" style="color: inherit; text-decoration: none;">
-                                                <?php echo htmlspecialchars($row['title']); ?>
+                                                <?php echo htmlspecialchars((string)($row['title'] ?? '')); ?>
                                             </a>
                                         </div>
                                         <div style="font-size: 11px; color: #64748b;">
-                                            Code: #<?php echo htmlspecialchars($row['auction_code'] ?? ('LOT-'.$row['id'])); ?>
-                                            <?php if (!empty($row['cat_name'])): ?> &bull; <?php echo htmlspecialchars($row['cat_name']); ?><?php endif; ?>
+                                            Code: #<?php echo htmlspecialchars((string)($row['auction_code'] ?? ('LOT-'.$row['id']))); ?>
+                                            <?php if (!empty($row['cat_name'])): ?> &bull; <?php echo htmlspecialchars((string)$row['cat_name']); ?><?php endif; ?>
                                         </div>
                                     </div>
                                 </div>
                             </td>
-                            <td>Rs. <?php echo number_format($row['starting_price'], 2); ?></td>
+                            <td>Rs. <?php echo number_format((float)($row['starting_price'] ?? 0), 2); ?></td>
                             <td style="font-weight: 700; color: #047857;" class="<?php echo $is_del ? 'strikethrough-text' : ''; ?>">
-                                Rs. <?php echo number_format($row['max_bid'] ?? $row['current_price'], 2); ?>
+                                Rs. <?php echo number_format((float)($row['max_bid'] ?? ($row['current_price'] ?? 0)), 2); ?>
                             </td>
                             <td><?php echo (int)$row['bid_count']; ?> bids</td>
                             <td>
@@ -477,12 +468,12 @@ include_once __DIR__ . '/../includes/header.php';
                                         <i class="fas fa-trash-alt"></i> Soft Deleted
                                     </span>
                                 <?php else: ?>
-                                    <span class="badge-status badge-<?php echo strtolower($row['status']); ?>">
-                                        <?php echo ucfirst($row['status']); ?>
+                                    <span class="badge-status badge-<?php echo strtolower($row['status'] ?? 'active'); ?>">
+                                        <?php echo ucfirst((string)($row['status'] ?? 'active')); ?>
                                     </span>
                                 <?php endif; ?>
                             </td>
-                            <td style="color: #64748b; font-size: 12px;"><?php echo !empty($row['end_time']) ? htmlspecialchars($row['end_time']) : 'No limit'; ?></td>
+                            <td style="color: #64748b; font-size: 12px;"><?php echo !empty($row['end_time']) ? htmlspecialchars((string)$row['end_time']) : 'No limit'; ?></td>
                             <td style="text-align: right;">
                                 <?php if (!$is_del): ?>
                                     <a href="edit_item.php?id=<?php echo $row['id']; ?>" class="seller-act-link seller-act-edit" title="Edit Item">
@@ -501,7 +492,7 @@ include_once __DIR__ . '/../includes/header.php';
                                 <?php endif; ?>
                             </td>
                         </tr>
-                        <?php endwhile; ?>
+                        <?php endforeach; ?>
                     </tbody>
                 </table>
             </div>
@@ -517,10 +508,6 @@ include_once __DIR__ . '/../includes/header.php';
 </div>
 
 <?php 
-if (isset($stmt)) {
-    mysqli_stmt_close($stmt);
-}
-
 // Render the unified quick view modal and interactive scripts
 render_unified_card_assets();
 

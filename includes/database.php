@@ -8,6 +8,10 @@
  * 2. OOP PDO Database Service (class Database) for modern services
  */
 
+if (date_default_timezone_get() !== 'Asia/Karachi') {
+    date_default_timezone_set('Asia/Karachi');
+}
+
 class Database
 {
     private string $host;
@@ -41,7 +45,6 @@ class Database
                 $port     = (int)($config['port'] ?? $port);
             }
         }
-
         $this->host     = $host;
         $this->dbName   = $dbName;
         $this->username = $username;
@@ -66,6 +69,7 @@ class Database
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_EMULATE_PREPARES   => false,
             PDO::ATTR_STRINGIFY_FETCHES  => false,
+            PDO::MYSQL_ATTR_INIT_COMMAND => "SET time_zone = '+05:00'",
         ];
 
         try {
@@ -150,8 +154,20 @@ class Database
     }
 }
 
-// Provide global $conn for all mysqli scripts across the system
-global $conn;
+    // Provide global $pdo for OOP PDO scripts across the system
+    global $pdo, $conn, $database;
+    $database = 'geo_auction_db';
+    $GLOBALS['database'] = $database;
+
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    try {
+        $pdo = Database::getPdo();
+    } catch (\Throwable $e) {
+        $pdo = null;
+    }
+}
+$GLOBALS['pdo'] = $pdo;
+
 if (!isset($conn) || !($conn instanceof mysqli) || !@$conn->ping()) {
     $conn = Database::getMysqli();
 }

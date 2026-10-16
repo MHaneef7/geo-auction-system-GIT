@@ -8,39 +8,29 @@ include_once __DIR__ . '/../includes/auth.php';
 
 require_admin('../index.php');
 
-$users_res    = mysqli_query($conn, "SELECT COUNT(*) AS c FROM users");
-$total_users  = mysqli_fetch_assoc($users_res)['c'] ?? 0;
+$pdo = Database::getPdo();
 
-$items_res    = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items");
-$total_items  = mysqli_fetch_assoc($items_res)['c'] ?? 0;
-
-$active_res   = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)");
-$active_items = mysqli_fetch_assoc($active_res)['c'] ?? 0;
-
-$ended_res    = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status IN ('ended', 'sold') AND (is_deleted = 0 OR is_deleted IS NULL)");
-$ended_items  = mysqli_fetch_assoc($ended_res)['c'] ?? 0;
-
-$bids_res     = mysqli_query($conn, "SELECT COUNT(*) AS c FROM bids");
-$total_bids   = mysqli_fetch_assoc($bids_res)['c'] ?? 0;
-
-$revenue_res  = mysqli_query($conn, "SELECT SUM(current_price) AS s FROM items WHERE status IN ('ended', 'sold') AND (is_deleted = 0 OR is_deleted IS NULL)");
-$total_rev    = mysqli_fetch_assoc($revenue_res)['s'] ?? 0;
-
-$avg_bid_res  = mysqli_query($conn, "SELECT AVG(bid_amount) AS avg FROM bids");
-$avg_bid      = mysqli_fetch_assoc($avg_bid_res)['avg'] ?? 0;
+$total_users  = (int)$pdo->query("SELECT COUNT(*) FROM users")->fetchColumn();
+$total_items  = (int)$pdo->query("SELECT COUNT(*) FROM items WHERE (is_deleted = 0 OR is_deleted IS NULL)")->fetchColumn();
+$active_items = (int)$pdo->query("SELECT COUNT(*) FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)")->fetchColumn();
+$ended_items  = (int)$pdo->query("SELECT COUNT(*) FROM items WHERE status = 'ended'")->fetchColumn();
+$total_bids   = (int)$pdo->query("SELECT COUNT(*) FROM bids")->fetchColumn();
+$total_rev    = (float)$pdo->query("SELECT SUM(current_price) FROM items WHERE status = 'ended'")->fetchColumn();
+$avg_bid      = (float)$pdo->query("SELECT AVG(bid_amount) FROM bids")->fetchColumn();
 
 // Top sellers
-$top_sellers_res = mysqli_query($conn, "
+$top_sellers_stmt = $pdo->query("
     SELECT u.name, u.email, COUNT(i.id) AS item_count, SUM(i.current_price) AS revenue
     FROM users u
-    JOIN items i ON i.seller_id = u.id AND i.status IN ('ended', 'sold') AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
+    JOIN items i ON i.seller_id = u.id AND i.status = 'ended'
     GROUP BY u.id
     ORDER BY revenue DESC
     LIMIT 5
 ");
+$top_sellers = $top_sellers_stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Top bidders
-$top_bidders_res = mysqli_query($conn, "
+$top_bidders_stmt = $pdo->query("
     SELECT u.name, u.email, COUNT(b.id) AS bid_count, SUM(b.bid_amount) AS total_bid
     FROM users u
     JOIN bids b ON b.user_id = u.id
@@ -48,26 +38,29 @@ $top_bidders_res = mysqli_query($conn, "
     ORDER BY bid_count DESC
     LIMIT 5
 ");
+$top_bidders = $top_bidders_stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Top categories
-$top_cats_res = mysqli_query($conn, "
+$top_cats_stmt = $pdo->query("
     SELECT c.name, COUNT(i.id) AS item_count
     FROM categories c
-    LEFT JOIN items i ON i.category_id = c.id
+    LEFT JOIN items i ON i.category_id = c.id AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
     GROUP BY c.id
     ORDER BY item_count DESC
     LIMIT 5
 ");
+$top_cats = $top_cats_stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Recent bids
-$recent_bids_res = mysqli_query($conn, "
-    SELECT b.bid_amount, b.created_at, u.name AS bidder, i.title AS item_title
+$recent_bids_stmt = $pdo->query("
+    SELECT b.bid_amount, b.created_at, COALESCE(b.bidder_name, u.name, 'Bidder') AS bidder, i.title AS item_title
     FROM bids b
     LEFT JOIN users u ON u.id = b.user_id
     LEFT JOIN items i ON i.id = b.item_id
     ORDER BY b.id DESC
     LIMIT 10
 ");
+$recent_bids = $recent_bids_stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -156,10 +149,10 @@ $recent_bids_res = mysqli_query($conn, "
         <a href="categories.php"><i class="fas fa-tags me-2"></i> Categories</a>
         <a href="items.php"><i class="fas fa-box-open me-2"></i> Items</a>
         <a href="bids.php"><i class="fas fa-hand-holding-usd me-2"></i> Bids</a>
+        <a href="payments.php"><i class="fas fa-credit-card me-2"></i> Payments</a>
         
         <div class="nav-category">System</div>
         <a href="reports.php" class="active"><i class="fas fa-chart-line me-2"></i> Reports</a>
-        <a href="setting.php"><i class="fas fa-database me-2"></i> Database & Backup</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>
     </div>
 
@@ -227,14 +220,14 @@ $recent_bids_res = mysqli_query($conn, "
                                     <tr><th class="ps-3 py-3">Seller</th><th class="py-3">Items Sold</th><th class="pe-3 py-3">Revenue</th></tr>
                                 </thead>
                                 <tbody>
-                                    <?php if ($top_sellers_res && mysqli_num_rows($top_sellers_res) > 0): ?>
-                                        <?php while ($row = mysqli_fetch_assoc($top_sellers_res)): ?>
+                                    <?php if (!empty($top_sellers)): ?>
+                                        <?php foreach ($top_sellers as $row): ?>
                                         <tr>
                                             <td class="ps-3 fw-semibold text-dark"><?php echo htmlspecialchars($row['name']); ?></td>
                                             <td><span class="badge bg-light text-dark border px-2 py-1"><?php echo $row['item_count']; ?></span></td>
                                             <td class="text-success fw-bold pe-3">Rs. <?php echo number_format($row['revenue'], 2); ?></td>
                                         </tr>
-                                        <?php endwhile; ?>
+                                        <?php endforeach; ?>
                                     <?php else: ?>
                                         <tr><td colspan="3" class="text-center text-muted py-4">No data yet.</td></tr>
                                     <?php endif; ?>
@@ -256,14 +249,14 @@ $recent_bids_res = mysqli_query($conn, "
                                     <tr><th class="ps-3 py-3">Bidder</th><th class="py-3">Total Bids</th><th class="pe-3 py-3">Total Spent</th></tr>
                                 </thead>
                                 <tbody>
-                                    <?php if ($top_bidders_res && mysqli_num_rows($top_bidders_res) > 0): ?>
-                                        <?php while ($row = mysqli_fetch_assoc($top_bidders_res)): ?>
+                                    <?php if (!empty($top_bidders)): ?>
+                                        <?php foreach ($top_bidders as $row): ?>
                                         <tr>
                                             <td class="ps-3 fw-semibold text-dark"><?php echo htmlspecialchars($row['name']); ?></td>
                                             <td><span class="badge bg-light text-dark border px-2 py-1"><?php echo $row['bid_count']; ?></span></td>
                                             <td class="text-primary fw-bold pe-3">Rs. <?php echo number_format($row['total_bid'], 2); ?></td>
                                         </tr>
-                                        <?php endwhile; ?>
+                                        <?php endforeach; ?>
                                     <?php else: ?>
                                         <tr><td colspan="3" class="text-center text-muted py-4">No bids yet.</td></tr>
                                     <?php endif; ?>
@@ -285,13 +278,13 @@ $recent_bids_res = mysqli_query($conn, "
                                     <tr><th class="ps-3 py-3">Category</th><th class="pe-3 py-3">Items Listed</th></tr>
                                 </thead>
                                 <tbody>
-                                    <?php if ($top_cats_res && mysqli_num_rows($top_cats_res) > 0): ?>
-                                        <?php while ($row = mysqli_fetch_assoc($top_cats_res)): ?>
+                                    <?php if (!empty($top_cats)): ?>
+                                        <?php foreach ($top_cats as $row): ?>
                                         <tr>
                                             <td class="ps-3 fw-semibold text-dark"><?php echo htmlspecialchars($row['name']); ?></td>
                                             <td class="pe-3"><span class="badge bg-light text-dark border px-2 py-1"><?php echo $row['item_count']; ?></span></td>
                                         </tr>
-                                        <?php endwhile; ?>
+                                        <?php endforeach; ?>
                                     <?php else: ?>
                                         <tr><td colspan="2" class="text-center text-muted py-4">No data yet.</td></tr>
                                     <?php endif; ?>
@@ -313,15 +306,15 @@ $recent_bids_res = mysqli_query($conn, "
                                     <tr><th class="ps-3 py-3">Bidder</th><th class="py-3">Item</th><th class="py-3">Amount</th><th class="pe-3 py-3">Time</th></tr>
                                 </thead>
                                 <tbody>
-                                    <?php if ($recent_bids_res && mysqli_num_rows($recent_bids_res) > 0): ?>
-                                        <?php while ($row = mysqli_fetch_assoc($recent_bids_res)): ?>
+                                    <?php if (!empty($recent_bids)): ?>
+                                        <?php foreach ($recent_bids as $row): ?>
                                         <tr>
                                             <td class="ps-3 fw-semibold text-dark"><?php echo htmlspecialchars($row['bidder'] ?? 'N/A'); ?></td>
                                             <td class="text-muted"><?php echo htmlspecialchars(substr($row['item_title'] ?? '', 0, 20)); ?></td>
                                             <td class="text-success fw-bold">Rs. <?php echo number_format($row['bid_amount'], 2); ?></td>
                                             <td class="text-muted small pe-3"><?php echo date('d M H:i', strtotime($row['created_at'])); ?></td>
                                         </tr>
-                                        <?php endwhile; ?>
+                                        <?php endforeach; ?>
                                     <?php else: ?>
                                         <tr><td colspan="4" class="text-center text-muted py-4">No recent bids.</td></tr>
                                     <?php endif; ?>

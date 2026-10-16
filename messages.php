@@ -23,9 +23,10 @@ require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/Database.php';
 require_once __DIR__ . '/includes/MessageService.php';
 
-require_login('login.php?redirect=messages.php');
+$loginRedirectTarget = 'messages.php' . (!empty($_SERVER['QUERY_STRING']) ? '?' . $_SERVER['QUERY_STRING'] : '');
+require_login('login.php?redirect=' . urlencode($loginRedirectTarget));
 
-$currentUserId = (int)($_SESSION['user_id'] ?? ($_SESSION['admin_id'] ?? 0));
+$currentUserId = (int)($_SESSION['user_id'] ?? 0);
 $msgService    = new MessageService();
 
 $targetUserId = isset($_GET['user_id']) ? (int)$_GET['user_id'] : 0;
@@ -63,6 +64,7 @@ if ($activePartnerId <= 0 && !empty($conversations)) {
 
 include_once __DIR__ . '/includes/header.php';
 ?>
+<meta name="csrf-token" content="<?php echo htmlspecialchars(csrf_token(), ENT_QUOTES, 'UTF-8'); ?>">
 
 <style>
 /* --------------------------------------------------------------------------
@@ -1291,11 +1293,14 @@ async function handleSendSubmit(event) {
     }
 
     try {
+        const csrfMeta = document.querySelector('meta[name="csrf-token"]');
+        const csrfToken = csrfMeta ? csrfMeta.getAttribute('content') : '';
         const res = await fetch('send_message.php', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest'
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRF-Token': csrfToken
             },
             body: JSON.stringify(payload)
         });

@@ -6,17 +6,8 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // Database Connection
-$has_db = false;
-$conn = null;
-if (file_exists(__DIR__ . '/../includes/database.php')) {
-    include_once __DIR__ . '/../includes/database.php';
-} elseif (file_exists(__DIR__ . '/includes/database.php')) {
-    include_once __DIR__ . '/includes/database.php';
-}
-
-if (isset($conn) && $conn instanceof mysqli && !$conn->connect_error) {
-    $has_db = true;
-}
+require_once __DIR__ . '/../includes/database.php';
+$has_db = ($pdo instanceof PDO);
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
@@ -77,34 +68,31 @@ $admin_user = null;
 $clean_username = ltrim($username, '@');
 
 // 1. Check dedicated 'admins' table if it exists
-$check_tbl = mysqli_query($conn, "SHOW TABLES LIKE 'admins'");
-if ($check_tbl && mysqli_num_rows($check_tbl) > 0) {
-    $stmt = mysqli_prepare($conn, "SELECT * FROM admins WHERE (email = ? OR username = ?) LIMIT 1");
-    if ($stmt) {
-        mysqli_stmt_bind_param($stmt, "ss", $username, $clean_username);
-        mysqli_stmt_execute($stmt);
-        $res = mysqli_stmt_get_result($stmt);
-        if ($res && $row = mysqli_fetch_assoc($res)) {
+try {
+    $check_tbl = $pdo->query("SHOW TABLES LIKE 'admins'");
+    if ($check_tbl && $check_tbl->fetch()) {
+        $stmt = $pdo->prepare("SELECT * FROM admins WHERE (email = :em OR username = :un) LIMIT 1");
+        $stmt->execute([':em' => $username, ':un' => $clean_username]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
             $admin_user = $row;
             $admin_user['role'] = 'admin'; // Enforce admin role
         }
-        mysqli_stmt_close($stmt);
     }
-}
+} catch (\Throwable $e) {}
 
 // 2. Query 'users' table where user can be identified by email, username, or name
 if (!$admin_user) {
-    $stmt = mysqli_prepare($conn, "SELECT `id`, `name`, `username`, `email`, `phone`, `password`, `role`, `status`, `avatar` FROM users WHERE (email = ? OR username = ? OR name = ?) LIMIT 1");
-    if ($stmt) {
-        mysqli_stmt_bind_param($stmt, "sss", $username, $clean_username, $username);
-        mysqli_stmt_execute($stmt);
-        $res = mysqli_stmt_get_result($stmt);
-        if ($res && $row = mysqli_fetch_assoc($res)) {
+    try {
+        $stmt = $pdo->prepare("SELECT `id`, `name`, `username`, `email`, `phone`, `password`, `role`, `status`, `avatar` FROM users WHERE (email = :em OR username = :un OR name = :nm) LIMIT 1");
+        $stmt->execute([':em' => $username, ':un' => $clean_username, ':nm' => $username]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
             $admin_user = $row;
         }
-        mysqli_stmt_close($stmt);
-    }
+    } catch (\Throwable $e) {}
 }
+
 
 if (!$admin_user) {
     $_SESSION['admin_login_attempts'] = (++$failed_attempts);

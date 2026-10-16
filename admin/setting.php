@@ -21,6 +21,7 @@ if (isset($_GET['backup_status'])) {
     $status_msg = $_GET['backup_msg'] ?? 'Operation completed.';
 }
 
+$database = $database ?? ($GLOBALS['database'] ?? 'geo_auction_db');
 $db_stats = getDatabaseStats($conn, $database);
 $existing_backups = getExistingBackups();
 ?>
@@ -113,8 +114,10 @@ $existing_backups = getExistingBackups();
         <a href="categories.php"><i class="fas fa-tags me-2"></i> Categories</a>
         <a href="items.php"><i class="fas fa-box-open me-2"></i> Items</a>
         <a href="bids.php"><i class="fas fa-hand-holding-usd me-2"></i> Bids</a>
+        <a href="payments.php"><i class="fas fa-credit-card me-2"></i> Payments</a>
         
         <div class="nav-category">System</div>
+        <a href="settings.php"><i class="fas fa-sliders-h me-2"></i> Platform Settings</a>
         <a href="setting.php" class="active"><i class="fas fa-database me-2"></i> Database & Backup</a>
         <a href="reports.php"><i class="fas fa-chart-line me-2"></i> Reports</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>

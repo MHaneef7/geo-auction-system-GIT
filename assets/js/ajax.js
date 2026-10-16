@@ -9,9 +9,9 @@
 const BidAPI = {
     place: function(auctionId, amount, callback) {
         $.ajax({
-            url: '/geo-auction-system/public/bid/place',
+            url: 'ajax/bid.php',
             method: 'POST',
-            data: { auction_id: auctionId, amount: amount, ajax: 1 },
+            data: { item_id: auctionId, bid_amount: amount, ajax: 1 },
             dataType: 'json',
             success: callback,
             error: function() {
@@ -22,7 +22,7 @@ const BidAPI = {
     
     history: function(auctionId, callback) {
         $.ajax({
-            url: '/geo-auction-system/public/bid/history/' + auctionId,
+            url: 'live_auction.php?ajax=1&id=' + auctionId,
             method: 'GET',
             dataType: 'json',
             success: callback
@@ -31,7 +31,7 @@ const BidAPI = {
     
     currentPrice: function(auctionId, callback) {
         $.ajax({
-            url: '/geo-auction-system/public/auction/current-price/' + auctionId,
+            url: 'live_auction.php?ajax=1&id=' + auctionId,
             method: 'GET',
             dataType: 'json',
             success: callback
@@ -45,7 +45,7 @@ const BidAPI = {
 const SearchAPI = {
     quick: function(query, callback) {
         $.ajax({
-            url: '/geo-auction-system/public/search/ajax',
+            url: 'ajax/search.php',
             method: 'GET',
             data: { q: query },
             dataType: 'json',
@@ -55,7 +55,7 @@ const SearchAPI = {
     
     advanced: function(params, callback) {
         $.ajax({
-            url: '/geo-auction-system/public/search',
+            url: 'search.php',
             method: 'GET',
             data: params,
             dataType: 'json',
@@ -70,7 +70,7 @@ const SearchAPI = {
 const NotificationAPI = {
     fetch: function(callback) {
         $.ajax({
-            url: '/geo-auction-system/public/notification/fetch',
+            url: 'ajax/notification.php?action=fetch',
             method: 'GET',
             dataType: 'json',
             success: callback
@@ -78,11 +78,11 @@ const NotificationAPI = {
     },
     
     markRead: function(id) {
-        $.post('/geo-auction-system/public/notification/read/' + id);
+        $.post('ajax/notification.php?action=mark_one&id=' + id);
     },
     
     markAllRead: function() {
-        $.post('/geo-auction-system/public/notification/read-all');
+        $.post('ajax/notification.php?action=mark_read');
     }
 };
 
@@ -92,7 +92,7 @@ const NotificationAPI = {
 const WishlistAPI = {
     toggle: function(auctionId, callback) {
         $.ajax({
-            url: '/geo-auction-system/public/wishlist/toggle',
+            url: 'user/wishlist.php?ajax=1&action=toggle',
             method: 'POST',
             data: { auction_id: auctionId, ajax: 1 },
             dataType: 'json',
@@ -102,7 +102,7 @@ const WishlistAPI = {
     
     check: function(auctionId, callback) {
         $.ajax({
-            url: '/geo-auction-system/public/wishlist/check/' + auctionId,
+            url: 'user/wishlist.php?ajax=1&action=check&id=' + auctionId,
             method: 'GET',
             dataType: 'json',
             success: callback

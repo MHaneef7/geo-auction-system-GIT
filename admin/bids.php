@@ -8,53 +8,43 @@ include_once __DIR__ . '/../includes/auth.php';
 
 require_admin('../index.php');
 
+$pdo = Database::getPdo();
+
 // Filter by item
 $item_filter = isset($_GET['item_id']) ? (int)$_GET['item_id'] : 0;
-$search      = isset($_GET['search']) ? trim($_GET['search']) : '';
+$search      = trim((string)($_GET['search'] ?? ''));
 
 $where_parts = [];
-$params      = [];
-$types       = '';
+$params = [];
 
 if ($item_filter > 0) {
-    $where_parts[] = "b.item_id = ?";
-    $params[]      = $item_filter;
-    $types        .= 'i';
+    $where_parts[] = "b.item_id = :item_id";
+    $params[':item_id'] = $item_filter;
 }
 if ($search !== '') {
-    $where_parts[] = "(u.name LIKE ? OR i.title LIKE ?)";
-    $like_term     = '%' . $search . '%';
-    $params[]      = $like_term;
-    $params[]      = $like_term;
-    $types        .= 'ss';
+    $where_parts[] = "(u.name LIKE :s1 OR i.title LIKE :s2 OR b.bidder_name LIKE :s3)";
+    $term = '%' . $search . '%';
+    $params[':s1'] = $term;
+    $params[':s2'] = $term;
+    $params[':s3'] = $term;
 }
-
 $where = count($where_parts) ? 'WHERE ' . implode(' AND ', $where_parts) : '';
-$sql = "
-    SELECT b.*, u.name AS bidder_name, u.email AS bidder_email, i.title AS item_title
+
+$stmt = $pdo->prepare("
+    SELECT b.*, u.name AS bidder_name_user, u.email AS bidder_email_user, i.title AS item_title
     FROM bids b
     LEFT JOIN users u ON u.id = b.user_id
     LEFT JOIN items i ON i.id = b.item_id
     $where
     ORDER BY b.id DESC
     LIMIT 500
-";
-
-if (!empty($params)) {
-    $stmt = mysqli_prepare($conn, $sql);
-    mysqli_stmt_bind_param($stmt, $types, ...$params);
-    mysqli_stmt_execute($stmt);
-    $bids_res = mysqli_stmt_get_result($stmt);
-} else {
-    $bids_res = mysqli_query($conn, $sql);
-}
+");
+$stmt->execute($params);
+$bids = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Stats
-$total_bids_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM bids");
-$total_bids = mysqli_fetch_assoc($total_bids_res)['c'] ?? 0;
-
-$total_amount_res = mysqli_query($conn, "SELECT SUM(bid_amount) AS s FROM bids");
-$total_amount = mysqli_fetch_assoc($total_amount_res)['s'] ?? 0;
+$total_bids   = (int)$pdo->query("SELECT COUNT(*) FROM bids")->fetchColumn();
+$total_amount = (float)$pdo->query("SELECT SUM(bid_amount) FROM bids")->fetchColumn();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -134,10 +124,10 @@ $total_amount = mysqli_fetch_assoc($total_amount_res)['s'] ?? 0;
         <a href="categories.php"><i class="fas fa-tags me-2"></i> Categories</a>
         <a href="items.php"><i class="fas fa-box-open me-2"></i> Items</a>
         <a href="bids.php" class="active"><i class="fas fa-hand-holding-usd me-2"></i> Bids</a>
+        <a href="payments.php"><i class="fas fa-credit-card me-2"></i> Payments</a>
         
         <div class="nav-category">System</div>
         <a href="reports.php"><i class="fas fa-chart-line me-2"></i> Reports</a>
-        <a href="setting.php"><i class="fas fa-database me-2"></i> Database & Backup</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>
     </div>
 
@@ -200,8 +190,11 @@ $total_amount = mysqli_fetch_assoc($total_amount_res)['s'] ?? 0;
                             </tr>
                         </thead>
                         <tbody>
-                            <?php if ($bids_res && mysqli_num_rows($bids_res) > 0): ?>
-                                <?php while ($bid = mysqli_fetch_assoc($bids_res)): ?>
+                            <?php if (!empty($bids)): ?>
+                                <?php foreach ($bids as $bid): 
+                                    $bidder_display = !empty($bid['bidder_name']) ? $bid['bidder_name'] : ($bid['bidder_name_user'] ?? 'N/A');
+                                    $email_display  = !empty($bid['bidder_email']) ? $bid['bidder_email'] : ($bid['bidder_email_user'] ?? '-');
+                                ?>
                                 <tr>
                                     <td class="ps-3 fw-semibold">#<?php echo $bid['id']; ?></td>
                                     <td>
@@ -209,8 +202,8 @@ $total_amount = mysqli_fetch_assoc($total_amount_res)['s'] ?? 0;
                                             <?php echo htmlspecialchars(substr($bid['item_title'] ?? 'N/A', 0, 30)); ?>
                                         </a>
                                     </td>
-                                    <td class="fw-bold text-dark"><?php echo htmlspecialchars($bid['bidder_name'] ?? 'N/A'); ?></td>
-                                    <td class="text-muted"><?php echo htmlspecialchars($bid['bidder_email'] ?? '-'); ?></td>
+                                    <td class="fw-bold text-dark"><?php echo htmlspecialchars($bidder_display); ?></td>
+                                    <td class="text-muted"><?php echo htmlspecialchars($email_display); ?></td>
                                     <td class="fw-bold text-success">Rs. <?php echo number_format($bid['bid_amount'] ?? 0, 2); ?></td>
                                     <td>
                                         <?php if (!empty($bid['is_winning'])): ?>
@@ -221,7 +214,7 @@ $total_amount = mysqli_fetch_assoc($total_amount_res)['s'] ?? 0;
                                     </td>
                                     <td class="text-muted small pe-3"><?php echo date('d M Y H:i', strtotime($bid['created_at'])); ?></td>
                                 </tr>
-                                <?php endwhile; ?>
+                                <?php endforeach; ?>
                             <?php else: ?>
                                 <tr><td colspan="7" class="text-center py-4 text-muted">No bids found.</td></tr>
                             <?php endif; ?>

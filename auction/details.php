@@ -12,18 +12,21 @@ $error = null;
 $item  = null;
 
 if ($id > 0) {
-    $item_res = mysqli_query($conn, "
-        SELECT i.*, u.name AS seller_name, u.email AS seller_email, c.name AS category_name
-        FROM items i
-        LEFT JOIN users u ON u.id = i.seller_id
-        LEFT JOIN categories c ON c.id = i.category_id
-        WHERE i.id = $id
-    ");
-    if ($item_res) {
-        $item = mysqli_fetch_assoc($item_res);
-    }
-    if (!$item) {
-        $error = 'Item not found.';
+    try {
+        $stmt = $pdo->prepare("
+            SELECT i.*, u.name AS seller_name, u.email AS seller_email, c.name AS category_name
+            FROM items i
+            LEFT JOIN users u ON u.id = i.seller_id
+            LEFT JOIN categories c ON c.id = i.category_id
+            WHERE i.id = :id
+        ");
+        $stmt->execute([':id' => $id]);
+        $item = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$item) {
+            $error = 'Item not found.';
+        }
+    } catch (\Throwable $e) {
+        $error = 'Database error fetching item.';
     }
 } else {
     $error = 'Invalid item ID.';

@@ -2,6 +2,16 @@ DirectoryIndex index.php index.php
 
 <IfModule mod_rewrite.c>
     RewriteEngine On
+    RewriteBase /geo-auction-system-GIT/
     # Redirect bare directory to index.php
     RewriteRule ^$ index.php [L]
+
+    # Redirect index.html to index.php
+    RewriteRule ^index\.html$ index.php [R=301,L]
+
+    # Map user/index.html?contact_id=X to messages.php?user_id=X
+    RewriteCond %{QUERY_STRING} (?:^|&)contact_id=([^&]+) [NC]
+    RewriteRule ^user/index\.html$ messages.php?user_id=%1 [R=302,L]
 </IfModule>
+
+

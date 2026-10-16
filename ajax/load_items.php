@@ -1,110 +1,119 @@
 <?php
-// ajax/load_items.php - Load items for infinite scroll / AJAX pagination
+/**
+ * AJAX Infinite Scroll & Lot Loader Endpoint
+ * File: ajax/load_items.php
+ * Geo Auction System
+ *
+ * Uses OOP PHP + PDO with pagination, soft-delete filtering, and 'Rs.' currency formatting.
+ */
+
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-header('Content-Type: application/json');
+header('Content-Type: application/json; charset=utf-8');
 
-include_once '../includes/database.php';
+require_once __DIR__ . '/../includes/database.php';
 
-$page        = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$page        = max(1, (int)($_GET['page'] ?? 1));
 $limit       = 12;
 $offset      = ($page - 1) * $limit;
-$category_id = isset($_GET['category_id']) ? (int)$_GET['category_id'] : 0;
-$sort        = isset($_GET['sort']) ? mysqli_real_escape_string($conn, $_GET['sort']) : 'newest';
+$category_id = (int)($_GET['category_id'] ?? 0);
+$sort        = trim($_GET['sort'] ?? 'newest');
 
-// Build WHERE
-$where = "WHERE i.status = 'active' AND (i.is_deleted = 0 OR i.is_deleted IS NULL)";
-$params = [];
-$types = '';
+try {
+    $pdo = Database::getPdo();
 
-if ($category_id > 0) {
-    $where .= " AND i.category_id = ?";
-    $params[] = $category_id;
-    $types .= 'i';
-}
+    // Build WHERE conditions
+    $whereParts = ["i.status = 'active'", "(i.is_deleted = 0 OR i.is_deleted IS NULL)"];
+    $params = [];
 
-// Build ORDER
-$order_map = [
-    'newest'     => 'i.created_at DESC',
-    'oldest'     => 'i.created_at ASC',
-    'price_asc'  => 'i.current_price ASC',
-    'price_desc' => 'i.current_price DESC',
-    'ending'     => 'i.end_time ASC',
-];
-$order = isset($order_map[$sort]) ? $order_map[$sort] : 'i.created_at DESC';
+    if ($category_id > 0) {
+        $whereParts[] = "i.category_id = :category_id";
+        $params[':category_id'] = $category_id;
+    }
 
-$sql = "
-    SELECT i.*, c.name AS category_name,
-           (SELECT COUNT(*) FROM bids b WHERE b.item_id = i.id) AS bid_count
-    FROM items i
-    LEFT JOIN categories c ON c.id = i.category_id
-    $where
-    ORDER BY $order
-    LIMIT ? OFFSET ?
-";
+    $whereSql = implode(' AND ', $whereParts);
 
-$item_params = $params;
-$item_types = $types . 'ii';
-$item_params[] = $limit;
-$item_params[] = $offset;
+    // Map sorting options
+    $orderMap = [
+        'newest'     => 'i.id DESC',
+        'oldest'     => 'i.id ASC',
+        'price_asc'  => 'i.current_price ASC',
+        'price_desc' => 'i.current_price DESC',
+        'ending'     => 'i.end_time ASC',
+    ];
+    $orderSql = $orderMap[$sort] ?? 'i.id DESC';
 
-$stmt = mysqli_prepare($conn, $sql);
-mysqli_stmt_bind_param($stmt, $item_types, ...$item_params);
-mysqli_stmt_execute($stmt);
-$items_res = mysqli_stmt_get_result($stmt);
+    // 1. Fetch total count
+    $cntStmt = $pdo->prepare("SELECT COUNT(*) AS c FROM items i WHERE $whereSql");
+    $cntStmt->execute($params);
+    $totalCount = (int)($cntStmt->fetch(PDO::FETCH_ASSOC)['c'] ?? 0);
 
-$items = [];
-if ($items_res) {
-    while ($row = mysqli_fetch_assoc($items_res)) {
-        // Time remaining
-        $time_remaining = '';
-        if ($row['end_time']) {
-            $diff = strtotime($row['end_time']) - time();
+    // 2. Fetch page records
+    $sql = "
+        SELECT i.*, c.name AS category_name,
+               (SELECT COUNT(*) FROM bids b WHERE b.item_id = i.id) AS bid_count
+        FROM items i
+        LEFT JOIN categories c ON c.id = i.category_id
+        WHERE $whereSql
+        ORDER BY $orderSql
+        LIMIT :limit OFFSET :offset
+    ";
+
+    $stmt = $pdo->prepare($sql);
+    foreach ($params as $k => $v) {
+        $stmt->bindValue($k, $v);
+    }
+    $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+    $stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+    $stmt->execute();
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $items = [];
+    $now = time();
+    foreach ($rows as $row) {
+        $timeRemaining = 'Ended';
+        if (!empty($row['end_time'])) {
+            $endTs = strtotime($row['end_time']);
+            $diff = $endTs - $now;
             if ($diff <= 0) {
-                $time_remaining = 'Ended';
+                $timeRemaining = 'Ended';
             } elseif ($diff < 3600) {
-                $time_remaining = round($diff / 60) . 'm left';
+                $timeRemaining = max(1, (int)round($diff / 60)) . 'm left';
             } elseif ($diff < 86400) {
-                $time_remaining = round($diff / 3600) . 'h left';
+                $timeRemaining = (int)round($diff / 3600) . 'h left';
             } else {
-                $time_remaining = round($diff / 86400) . 'd left';
+                $timeRemaining = (int)round($diff / 86400) . 'd left';
             }
         }
+
+        $price = (float)($row['current_price'] > 0 ? $row['current_price'] : ($row['starting_price'] ?? 0));
+        $img = !empty($row['featured_image']) ? $row['featured_image'] : 'assets/image/placeholder.png';
+
         $items[] = [
-            'id'            => $row['id'],
-            'title'         => $row['title'],
-            'current_price' => 'Rs. ' . number_format((float)($row['current_price'] ?? $row['starting_price']), 2),
-            'bid_count'     => (int)$row['bid_count'],
-            'time_remaining'=> $time_remaining,
-            'category'      => $row['category_name'] ?? '',
-            'image'         => $row['image'] ?? '',
-            'url'           => '../live_auction.php?id=' . $row['id'],
+            'id'             => (int)$row['id'],
+            'title'          => htmlspecialchars($row['title'], ENT_QUOTES, 'UTF-8'),
+            'current_price'  => 'Rs. ' . number_format($price, 2),
+            'price_raw'      => $price,
+            'bid_count'      => (int)($row['bid_count'] ?? 0),
+            'time_remaining' => $timeRemaining,
+            'category'       => htmlspecialchars($row['category_name'] ?? '', ENT_QUOTES, 'UTF-8'),
+            'image'          => $img,
+            'url'            => 'live_auction.php?id=' . (int)$row['id'],
         ];
     }
-}
-if ($stmt) mysqli_stmt_close($stmt);
 
-// Total count for has_more check
-$count_sql = "SELECT COUNT(*) AS c FROM items i $where";
-if (!empty($params)) {
-    $c_stmt = mysqli_prepare($conn, $count_sql);
-    mysqli_stmt_bind_param($c_stmt, $types, ...$params);
-    mysqli_stmt_execute($c_stmt);
-    $count_res = mysqli_stmt_get_result($c_stmt);
-    $total = mysqli_fetch_assoc($count_res)['c'] ?? 0;
-    mysqli_stmt_close($c_stmt);
-} else {
-    $count_res = mysqli_query($conn, $count_sql);
-    $total = mysqli_fetch_assoc($count_res)['c'] ?? 0;
-}
+    echo json_encode([
+        'success'   => true,
+        'items'     => $items,
+        'has_more'  => ($offset + count($items)) < $totalCount,
+        'page'      => $page,
+        'total'     => $totalCount
+    ]);
 
-echo json_encode([
-    'success'  => true,
-    'items'    => $items,
-    'page'     => $page,
-    'has_more' => ($page * $limit) < $total,
-    'total'    => $total,
-]);
-exit;
+} catch (\Throwable $e) {
+    error_log("ajax/load_items.php Error: " . $e->getMessage());
+    echo json_encode(['success' => false, 'items' => [], 'has_more' => false, 'message' => 'Failed to load items.']);
+}
+exit();

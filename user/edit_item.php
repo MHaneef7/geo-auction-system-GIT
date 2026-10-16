@@ -72,20 +72,24 @@ $is_admin        = ($user_role === 'admin');
 // -----------------------------------------------------------------------------
 // 2. PDO Database Initialization (Object-Oriented, No Procedural Calls)
 // -----------------------------------------------------------------------------
-$db_host = 'localhost';
-$db_name = 'geo_auction_db';
-$db_user = 'root';
-$db_pass = '';
-
+require_once __DIR__ . '/../includes/database.php';
 try {
-    $pdo = new PDO("mysql:host={$db_host};dbname={$db_name};charset=utf8mb4", $db_user, $db_pass, [
-        PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        PDO::ATTR_EMULATE_PREPARES   => false,
-    ]);
-} catch (PDOException $e) {
-    error_log("Database connection failed in edit_item.php: " . $e->getMessage());
-    die("Database service temporarily unavailable. Please try again later.");
+    $pdo = Database::getPdo();
+} catch (\Throwable $e) {
+    $db_host = 'localhost';
+    $db_name = 'geo_auction_db';
+    $db_user = 'root';
+    $db_pass = '';
+    try {
+        $pdo = new PDO("mysql:host={$db_host};dbname={$db_name};charset=utf8mb4", $db_user, $db_pass, [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES   => false,
+        ]);
+    } catch (PDOException $e2) {
+        error_log("Database connection failed in edit_item.php: " . $e2->getMessage());
+        die("Database service temporarily unavailable. Please try again later.");
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -117,6 +121,13 @@ if (!function_exists('format_category_icon')) {
             return 'fa-solid ' . $icon;
         }
         return 'fa-solid fa-' . $icon;
+    }
+}
+
+// Helper to safely encode HTML strings under strict_types=1 without TypeError on null
+if (!function_exists('safe_html')) {
+    function safe_html(mixed $str): string {
+        return htmlspecialchars((string)($str ?? ''), ENT_QUOTES, 'UTF-8');
     }
 }
 
@@ -434,8 +445,8 @@ if ($item && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                         mkdir($upload_dir, 0755, true);
                     }
 
-                    $allowed_exts  = ['jpg', 'jpeg', 'png', 'webp'];
-                    $allowed_mimes = ['image/jpeg', 'image/png', 'image/webp'];
+                    $allowed_exts  = ['jpg', 'jpeg', 'png', 'webp', 'jfif', 'pjpeg', 'gif', 'avif'];
+                    $allowed_mimes = ['image/jpeg', 'image/pjpeg', 'image/png', 'image/x-png', 'image/webp', 'image/gif', 'image/avif', 'image/x-jfif'];
 
                     for ($i = 0; $i < $upload_count; $i++) {
                         if ($files['error'][$i] === UPLOAD_ERR_OK) {
@@ -445,23 +456,39 @@ if ($item && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                             $file_ext  = strtolower(pathinfo($orig_name, PATHINFO_EXTENSION));
 
                             if (!in_array($file_ext, $allowed_exts, true)) {
-                                $error_msg = "File '{$orig_name}' has an unsupported extension. Allowed: JPG, PNG, WEBP.";
+                                $error_msg = "File '{$orig_name}' has an unsupported extension. Allowed: JPG, PNG, WEBP, JFIF, GIF.";
                                 break;
                             }
-                            if ($file_size > 5 * 1024 * 1024) {
-                                $error_msg = "File '{$orig_name}' exceeds the 5MB size limit.";
+                            if ($file_size > 8 * 1024 * 1024) {
+                                $error_msg = "File '{$orig_name}' exceeds the 8MB size limit.";
                                 break;
                             }
 
-                            $finfo = new finfo(FILEINFO_MIME_TYPE);
-                            $mime  = $finfo->file($tmp_path);
-                            if (!in_array($mime, $allowed_mimes, true)) {
+                            $mime = '';
+                            if (class_exists('finfo')) {
+                                $finfo = new finfo(FILEINFO_MIME_TYPE);
+                                $mime  = $finfo->file($tmp_path);
+                            }
+                            $img_info = @getimagesize($tmp_path);
+                            if (!empty($img_info['mime']) && empty($mime)) {
+                                $mime = $img_info['mime'];
+                            }
+
+                            if (!in_array($mime, $allowed_mimes, true) && $img_info === false) {
                                 $error_msg = "Security check failed: File '{$orig_name}' is not a valid image.";
                                 break;
                             }
 
                             // Generate clean, collision-free filename
-                            $new_filename = 'item_' . $item_id . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $file_ext;
+                            $normalized_ext = match($file_ext) {
+                                'jpeg', 'jfif', 'pjpeg' => 'jpg',
+                                'png' => 'png',
+                                'webp' => 'webp',
+                                'gif' => 'gif',
+                                'avif' => 'avif',
+                                default => 'jpg'
+                            };
+                            $new_filename = 'item_' . $item_id . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $normalized_ext;
                             $target_filepath = $upload_dir . $new_filename;
 
                             if (move_uploaded_file($tmp_path, $target_filepath)) {
@@ -480,78 +507,58 @@ if ($item && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                 try {
                     $pdo->beginTransaction();
 
-                    $update_sql = "
-                        UPDATE items SET
-                            title             = :title,
-                            category_id       = :category_id,
-                            short_description = :short_description,
-                            description       = :description,
-                            starting_price    = :starting_price,
-                            reserve_price     = :reserve_price,
-                            min_increment     = :min_increment,
-                            buy_it_now_price  = :buy_it_now_price,
-                            condition_type    = :condition_type,
-                            brand             = :brand,
-                            model             = :model,
-                            year              = :year,
-                            mileage           = :mileage,
-                            engine_type       = :engine_type,
-                            color             = :color,
-                            location_address  = :location_address,
-                            city              = :city,
-                            location_city     = :location_city,
-                            area              = :area,
-                            location_state    = :location_state,
-                            location_country  = :location_country,
-                            location_lat      = :location_lat,
-                            location_lng      = :location_lng,
-                            start_time        = :start_time,
-                            end_time          = :end_time,
-                            status            = :status,
-                            featured          = :featured,
-                            approved          = :approved,
-                            meta_title        = :meta_title,
-                            meta_description  = :meta_description,
-                            meta_keywords     = :meta_keywords,
-                            updated_at        = NOW()
-                        WHERE id = :id
-                    ";
+                    // Dynamically filter update columns based on table schema
+                    $colStmt = $pdo->query("SHOW COLUMNS FROM items");
+                    $existingItemCols = $colStmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
 
-                    $update_params = [
-                        ':title'             => $title,
-                        ':category_id'       => $category_id,
-                        ':short_description' => $short_description !== '' ? $short_description : null,
-                        ':description'       => $description,
-                        ':starting_price'    => $starting_price,
-                        ':reserve_price'     => $reserve_price,
-                        ':min_increment'     => $min_increment,
-                        ':buy_it_now_price'  => $buy_it_now_price,
-                        ':condition_type'    => $condition_type !== '' ? $condition_type : null,
-                        ':brand'             => $brand !== '' ? $brand : null,
-                        ':model'             => $model !== '' ? $model : null,
-                        ':year'              => $year,
-                        ':mileage'           => $mileage !== '' ? $mileage : null,
-                        ':engine_type'       => $engine_type !== '' ? $engine_type : null,
-                        ':color'             => $color !== '' ? $color : null,
-                        ':location_address'  => $location_address !== '' ? $location_address : null,
-                        ':city'              => $city,
-                        ':location_city'     => $city,
-                        ':area'              => $area !== '' ? $area : null,
-                        ':location_state'    => $location_state !== '' ? $location_state : null,
-                        ':location_country'  => $location_country !== '' ? $location_country : 'Pakistan',
-                        ':location_lat'      => $location_lat,
-                        ':location_lng'      => $location_lng,
-                        ':start_time'        => $start_time_mysql,
-                        ':end_time'          => $end_time_mysql,
-                        ':status'            => $status,
-                        ':featured'          => $featured,
-                        ':approved'          => $approved,
-                        ':meta_title'        => $meta_title !== '' ? $meta_title : null,
-                        ':meta_description'  => $meta_description !== '' ? $meta_description : null,
-                        ':meta_keywords'     => $meta_keywords !== '' ? $meta_keywords : null,
-                        ':id'                => $item_id,
+                    $potentialCols = [
+                        'title'             => $title,
+                        'category_id'       => $category_id,
+                        'short_description' => $short_description !== '' ? $short_description : null,
+                        'description'       => $description,
+                        'starting_price'    => $starting_price,
+                        'reserve_price'     => $reserve_price,
+                        'min_increment'     => $min_increment,
+                        'buy_it_now_price'  => $buy_it_now_price,
+                        'condition_type'    => $condition_type !== '' ? $condition_type : null,
+                        'brand'             => $brand !== '' ? $brand : null,
+                        'model'             => $model !== '' ? $model : null,
+                        'year'              => $year,
+                        'mileage'           => $mileage !== '' ? $mileage : null,
+                        'engine_type'       => $engine_type !== '' ? $engine_type : null,
+                        'color'             => $color !== '' ? $color : null,
+                        'location_address'  => $location_address !== '' ? $location_address : null,
+                        'city'              => $city,
+                        'location_city'     => $city,
+                        'area'              => $area !== '' ? $area : null,
+                        'location_state'    => $location_state !== '' ? $location_state : null,
+                        'location_country'  => $location_country !== '' ? $location_country : 'Pakistan',
+                        'location_lat'      => $location_lat,
+                        'location_lng'      => $location_lng,
+                        'start_time'        => $start_time_mysql,
+                        'end_time'          => $end_time_mysql,
+                        'status'            => $status,
+                        'featured'          => $featured,
+                        'approved'          => $approved,
+                        'meta_title'        => $meta_title !== '' ? $meta_title : null,
+                        'meta_description'  => $meta_description !== '' ? $meta_description : null,
+                        'meta_keywords'     => $meta_keywords !== '' ? $meta_keywords : null,
                     ];
 
+                    $setClauses = [];
+                    $update_params = [':id' => $item_id];
+                    foreach ($potentialCols as $colName => $val) {
+                        if (in_array($colName, $existingItemCols, true)) {
+                            $paramKey = ':' . $colName;
+                            $setClauses[] = "{$colName} = {$paramKey}";
+                            $update_params[$paramKey] = $val;
+                        }
+                    }
+                    if (in_array('updated_at', $existingItemCols, true)) {
+                        $setClauses[] = "updated_at = NOW()";
+                    }
+
+                    $update_sql = "UPDATE items SET " . implode(', ', $setClauses) . " WHERE id = :id";
                     $stmt_update = $pdo->prepare($update_sql);
                     $stmt_update->execute($update_params);
 
@@ -801,6 +808,7 @@ include_once __DIR__ . '/../includes/header.php';
     border-width: 2px !important;
 }
 </style>
+<link rel="stylesheet" href="../assets/css/ai_reserve_price.css">
 
 <div class="container-fluid py-2" style="max-width: 1040px;">
 
@@ -811,7 +819,7 @@ include_once __DIR__ . '/../includes/header.php';
                 <i class="bi bi-shield-x"></i>
             </div>
             <h3 class="fw-bold text-dark mb-2">Access Denied / Lot Not Found</h3>
-            <p class="text-muted mb-4"><?= htmlspecialchars($error_msg ?: 'The requested auction lot does not exist or you do not have permission to modify it.'); ?></p>
+            <p class="text-muted mb-4"><?= safe_html($error_msg ?: 'The requested auction lot does not exist or you do not have permission to modify it.'); ?></p>
             <div>
                 <a href="my_auctions.php" class="btn btn-emerald px-4 py-2 rounded-3 fw-semibold">
                     <i class="bi bi-arrow-left me-1"></i> Back to My Listings
@@ -828,7 +836,7 @@ include_once __DIR__ . '/../includes/header.php';
                         Lot #<?= (int)$item['id']; ?>
                     </span>
                     <span class="badge bg-secondary bg-opacity-10 text-secondary px-2.5 py-1 rounded-pill text-xs fw-bold">
-                        <?= htmlspecialchars(strtoupper($item['auction_code'] ?? 'LOT')); ?>
+                        <?= safe_html(strtoupper((string)($item['auction_code'] ?? 'LOT'))); ?>
                     </span>
                     <?php if ($is_admin): ?>
                         <span class="badge bg-primary bg-opacity-10 text-primary px-2.5 py-1 rounded-pill text-xs fw-bold">
@@ -837,7 +845,7 @@ include_once __DIR__ . '/../includes/header.php';
                     <?php endif; ?>
                 </div>
                 <h1 class="h3 fw-bold text-dark mb-0">
-                    Edit Auction Listing: <span class="text-truncate text-secondary fw-normal fs-5"><?= htmlspecialchars($item['title']); ?></span>
+                    Edit Auction Listing: <span class="text-truncate text-secondary fw-normal fs-5"><?= safe_html($item['title'] ?? ''); ?></span>
                 </h1>
                 <p class="text-muted small mb-0">Update item details, adjust scheduling, and manage lot photographs.</p>
             </div>
@@ -859,7 +867,7 @@ include_once __DIR__ . '/../includes/header.php';
                 <i class="bi bi-check-circle-fill fs-4 text-success flex-shrink-0"></i>
                 <div class="flex-grow-1">
                     <strong class="d-block">Success!</strong>
-                    <span><?= htmlspecialchars($success_msg); ?></span>
+                    <span><?= safe_html($success_msg); ?></span>
                     <div class="mt-2.5 d-flex gap-2">
                         <a href="../live_auction.php?id=<?= (int)$item['id']; ?>" target="_blank" class="btn btn-sm btn-success fw-bold px-3">
                             <i class="bi bi-eye me-1"></i> View Item
@@ -879,7 +887,7 @@ include_once __DIR__ . '/../includes/header.php';
                 <i class="bi bi-exclamation-octagon-fill fs-4 text-danger flex-shrink-0"></i>
                 <div>
                     <strong class="d-block">Please correct the highlighted issues:</strong>
-                    <span><?= htmlspecialchars($error_msg); ?></span>
+                    <span><?= safe_html($error_msg); ?></span>
                 </div>
                 <button type="button" class="btn-close ms-auto" data-bs-dismiss="alert" aria-label="Close"></button>
             </div>
@@ -918,19 +926,19 @@ include_once __DIR__ . '/../includes/header.php';
                             <div class="col-6 col-sm-4 col-md-3 col-lg-2.4" id="img-card-<?= (int)$img['id']; ?>">
                                 <div class="card h-100 border image-manage-card rounded-3 overflow-hidden position-relative <?= $is_primary_img ? 'border-success ring-2 ring-success' : 'border-slate-200'; ?>">
                                     <div style="height: 130px; background: #0f172a;" class="d-flex align-items-center justify-content-center overflow-hidden">
-                                        <img src="<?= htmlspecialchars($web_path); ?>" 
+                                        <img src="<?= safe_html($web_path); ?>" 
                                              alt="Lot Image" 
                                              class="w-100 h-100 object-fit-cover"
                                              onerror="this.onerror=null;this.src='https://images.unsplash.com/photo-1517336714731-489689fd1ca8?auto=format&fit=crop&w=400&q=80'">
                                     </div>
                                     <div class="p-2 bg-light d-flex flex-column gap-1.5 border-top">
                                         <?php if ($is_primary_img): ?>
-                                            <span class="badge bg-success text-white py-1 text-center small fw-bold">
+                                             <span class="badge bg-success text-white py-1 text-center small fw-bold">
                                                 <i class="bi bi-star-fill me-1"></i> Featured
                                             </span>
                                         <?php else: ?>
                                             <form method="POST" action="edit_item.php?id=<?= $item_id; ?>" class="d-inline m-0">
-                                                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token); ?>">
+                                                <input type="hidden" name="csrf_token" value="<?= safe_html($csrf_token); ?>">
                                                 <input type="hidden" name="action" value="set_primary_image">
                                                 <input type="hidden" name="image_id" value="<?= (int)$img['id']; ?>">
                                                 <button type="submit" class="btn btn-outline-secondary btn-sm w-100 py-0.5 text-xs fw-semibold" title="Set as primary featured image">
@@ -940,7 +948,7 @@ include_once __DIR__ . '/../includes/header.php';
                                         <?php endif; ?>
 
                                         <form method="POST" action="edit_item.php?id=<?= $item_id; ?>" onsubmit="return confirm('Delete this image permanently?');" class="d-inline m-0">
-                                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token); ?>">
+                                            <input type="hidden" name="csrf_token" value="<?= safe_html($csrf_token); ?>">
                                             <input type="hidden" name="action" value="delete_image">
                                             <input type="hidden" name="image_id" value="<?= (int)$img['id']; ?>">
                                             <button type="submit" class="btn btn-outline-danger btn-sm w-100 py-0.5 text-xs fw-semibold">
@@ -992,7 +1000,7 @@ include_once __DIR__ . '/../includes/header.php';
         <div class="card border-0 shadow-sm rounded-4 bg-white overflow-hidden">
             <div class="card-body p-4 p-md-5">
                 <form method="POST" action="edit_item.php?id=<?= $item_id; ?>" id="editAuctionForm" enctype="multipart/form-data" novalidate>
-                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token); ?>">
+                    <input type="hidden" name="csrf_token" value="<?= safe_html($csrf_token); ?>">
                     <input type="hidden" name="action" value="update_item">
                     <input type="hidden" name="item_id" value="<?= $item_id; ?>">
 
@@ -1013,7 +1021,7 @@ include_once __DIR__ . '/../includes/header.php';
                                        class="form-control form-control-lg" 
                                        id="fieldTitle" 
                                        name="title" 
-                                       value="<?= htmlspecialchars($_POST['title'] ?? $item['title']); ?>" 
+                                       value="<?= safe_html($_POST['title'] ?? ($item['title'] ?? '')); ?>" 
                                        placeholder="e.g. 1968 Ford Mustang Fastback GT 390 V8" 
                                        required>
                                 <div class="form-text">A descriptive title helps buyers find your listing quickly.</div>
@@ -1063,8 +1071,8 @@ include_once __DIR__ . '/../includes/header.php';
                                             $selected_cat_id = (int)($_POST['category_id'] ?? ($item['category_id'] ?? 0));
                                             foreach ($categories_list as $cat): 
                                                 $cid = (int)$cat['id'];
-                                                $cname = htmlspecialchars($cat['name']);
-                                                $cicon = htmlspecialchars(format_category_icon($cat['icon'] ?? 'fa-tag'));
+                                                $cname = safe_html($cat['name'] ?? '');
+                                                $cicon = safe_html(format_category_icon($cat['icon'] ?? 'fa-tag'));
                                                 $is_selected = ($cid === $selected_cat_id);
                                             ?>
                                                 <button type="button" 
@@ -1109,8 +1117,8 @@ include_once __DIR__ . '/../includes/header.php';
                                         $selected_cat_id = (int)($_POST['category_id'] ?? ($item['category_id'] ?? 0));
                                         foreach ($categories_list as $cat): 
                                             $cid = (int)$cat['id'];
-                                            $cname = htmlspecialchars($cat['name']);
-                                            $cicon = htmlspecialchars(format_category_icon($cat['icon'] ?? 'fa-tag'));
+                                            $cname = safe_html($cat['name'] ?? '');
+                                            $cicon = safe_html(format_category_icon($cat['icon'] ?? 'fa-tag'));
                                             $is_selected = ($cid === $selected_cat_id);
                                         ?>
                                             <div class="col-6 col-sm-4 col-md-3 col-lg-2">
@@ -1144,7 +1152,7 @@ include_once __DIR__ . '/../includes/header.php';
                                        id="fieldShortDesc" 
                                        name="short_description" 
                                        maxlength="500"
-                                       value="<?= htmlspecialchars($_POST['short_description'] ?? ($item['short_description'] ?? '')); ?>" 
+                                       value="<?= safe_html($_POST['short_description'] ?? ($item['short_description'] ?? '')); ?>" 
                                        placeholder="Brief 1-2 sentence highlight shown in catalog cards...">
                             </div>
 
@@ -1158,7 +1166,7 @@ include_once __DIR__ . '/../includes/header.php';
                                           name="description" 
                                           rows="6" 
                                           placeholder="Detail specifications, history, included accessories, documentation, and condition..." 
-                                          required><?= htmlspecialchars($_POST['description'] ?? $item['description']); ?></textarea>
+                                          required><?= safe_html($_POST['description'] ?? ($item['description'] ?? '')); ?></textarea>
                             </div>
                         </div>
                     </div>
@@ -1184,7 +1192,7 @@ include_once __DIR__ . '/../includes/header.php';
                                            class="form-control <?= $has_bids ? 'readonly-lock' : ''; ?>" 
                                            id="fieldStartingPrice" 
                                            name="starting_price" 
-                                           value="<?= htmlspecialchars((string)($_POST['starting_price'] ?? $item['starting_price'])); ?>" 
+                                           value="<?= safe_html($_POST['starting_price'] ?? ($item['starting_price'] ?? '')); ?>" 
                                            <?= $has_bids ? 'readonly tabindex="-1"' : 'required'; ?>>
                                 </div>
                                 <div class="form-text"><?= $has_bids ? 'Locked: Bids placed' : 'Initial minimum opening bid.'; ?></div>
@@ -1203,11 +1211,22 @@ include_once __DIR__ . '/../includes/header.php';
                                            class="form-control <?= $has_bids ? 'readonly-lock' : ''; ?>" 
                                            id="fieldReservePrice" 
                                            name="reserve_price" 
-                                           value="<?= htmlspecialchars((string)($_POST['reserve_price'] ?? ($item['reserve_price'] ?? ''))); ?>" 
+                                           value="<?= safe_html($_POST['reserve_price'] ?? ($item['reserve_price'] ?? '')); ?>" 
                                            <?= $has_bids ? 'readonly tabindex="-1"' : ''; ?> 
-                                           placeholder="None">
+                                            placeholder="None">
                                 </div>
                                 <div class="form-text">Minimum secret target to sell.</div>
+                                
+                                <!-- AI Dynamic Valuation Trigger Button -->
+                                <div class="mt-2">
+                                    <button type="button" 
+                                            id="btnAiReserve" 
+                                            class="btn btn-sm <?= $has_bids ? 'btn-outline-secondary' : 'btn-outline-success'; ?> w-100 d-inline-flex align-items-center justify-content-center gap-1 py-1 shadow-sm"
+                                            style="<?= $has_bids ? '' : 'border-color: #10b981; color: #047857; font-weight: 600; background: #ecfdf5;'; ?> font-size: 0.82rem;">
+                                        <i class="bi bi-stars text-warning fs-6"></i>
+                                        <span><?= $has_bids ? '⚡ View AI Valuation' : '⚡ AI Suggest Reserve Price'; ?></span>
+                                    </button>
+                                </div>
                             </div>
 
                             <!-- 7. Minimum Bid Increment -->
@@ -1223,7 +1242,7 @@ include_once __DIR__ . '/../includes/header.php';
                                            class="form-control <?= $has_bids ? 'readonly-lock' : ''; ?>" 
                                            id="fieldMinIncrement" 
                                            name="min_increment" 
-                                           value="<?= htmlspecialchars((string)($_POST['min_increment'] ?? ($item['min_increment'] ?? '100.00'))); ?>" 
+                                           value="<?= safe_html($_POST['min_increment'] ?? ($item['min_increment'] ?? '100.00')); ?>" 
                                            <?= $has_bids ? 'readonly tabindex="-1"' : ''; ?>>
                                 </div>
                                 <div class="form-text">Min increment between bids.</div>
@@ -1242,11 +1261,14 @@ include_once __DIR__ . '/../includes/header.php';
                                            class="form-control" 
                                            id="fieldBuyNow" 
                                            name="buy_it_now_price" 
-                                           value="<?= htmlspecialchars((string)($_POST['buy_it_now_price'] ?? ($item['buy_it_now_price'] ?? ''))); ?>" 
+                                           value="<?= safe_html($_POST['buy_it_now_price'] ?? ($item['buy_it_now_price'] ?? '')); ?>" 
                                            placeholder="Leave blank if none">
                                 </div>
                                 <div class="form-text">Instant purchase buyout price.</div>
                             </div>
+
+                            <!-- AI Valuation Display Container -->
+                            <div class="col-12" id="aiReserveContainer" style="display: none;"></div>
                         </div>
                     </div>
 
@@ -1268,8 +1290,8 @@ include_once __DIR__ . '/../includes/header.php';
                                 <select class="form-select" id="fieldCondition" name="condition_type">
                                     <option value="">-- Select Condition --</option>
                                     <?php foreach ($cond_options as $cOpt): ?>
-                                        <option value="<?= htmlspecialchars($cOpt); ?>" <?= strcasecmp($curr_cond, $cOpt) === 0 ? 'selected' : ''; ?>>
-                                            <?= htmlspecialchars($cOpt); ?>
+                                        <option value="<?= safe_html($cOpt); ?>" <?= strcasecmp((string)$curr_cond, $cOpt) === 0 ? 'selected' : ''; ?>>
+                                            <?= safe_html($cOpt); ?>
                                         </option>
                                     <?php endforeach; ?>
                                 </select>
@@ -1279,42 +1301,42 @@ include_once __DIR__ . '/../includes/header.php';
                             <div class="col-md-4">
                                 <label for="fieldBrand" class="form-label fw-semibold text-secondary small">Brand / Make</label>
                                 <input type="text" class="form-control" id="fieldBrand" name="brand" 
-                                       value="<?= htmlspecialchars($_POST['brand'] ?? ($item['brand'] ?? '')); ?>" placeholder="e.g. Rolex, Toyota, Apple">
+                                       value="<?= safe_html($_POST['brand'] ?? ($item['brand'] ?? '')); ?>" placeholder="e.g. Rolex, Toyota, Apple">
                             </div>
 
                             <!-- 11. Model -->
                             <div class="col-md-4">
                                 <label for="fieldModel" class="form-label fw-semibold text-secondary small">Model / Series</label>
                                 <input type="text" class="form-control" id="fieldModel" name="model" 
-                                       value="<?= htmlspecialchars($_POST['model'] ?? ($item['model'] ?? '')); ?>" placeholder="e.g. Submariner Date, Corolla GLi">
+                                       value="<?= safe_html($_POST['model'] ?? ($item['model'] ?? '')); ?>" placeholder="e.g. Submariner Date, Corolla GLi">
                             </div>
 
                             <!-- 12. Year -->
                             <div class="col-md-3">
                                 <label for="fieldYear" class="form-label fw-semibold text-secondary small">Manufacture Year</label>
                                 <input type="number" class="form-control" id="fieldYear" name="year" min="1900" max="<?= date('Y') + 2; ?>" 
-                                       value="<?= htmlspecialchars((string)($_POST['year'] ?? ($item['year'] ?? ''))); ?>" placeholder="e.g. 2022">
+                                       value="<?= safe_html($_POST['year'] ?? ($item['year'] ?? '')); ?>" placeholder="e.g. 2022">
                             </div>
 
                             <!-- 13. Mileage -->
                             <div class="col-md-3">
                                 <label for="fieldMileage" class="form-label fw-semibold text-secondary small">Mileage / Usage</label>
                                 <input type="text" class="form-control" id="fieldMileage" name="mileage" 
-                                       value="<?= htmlspecialchars($_POST['mileage'] ?? ($item['mileage'] ?? '')); ?>" placeholder="e.g. 24,000 km, 120 hrs">
+                                       value="<?= safe_html($_POST['mileage'] ?? ($item['mileage'] ?? '')); ?>" placeholder="e.g. 24,000 km, 120 hrs">
                             </div>
 
                             <!-- 14. Engine Type -->
                             <div class="col-md-3">
                                 <label for="fieldEngine" class="form-label fw-semibold text-secondary small">Engine / Power Type</label>
                                 <input type="text" class="form-control" id="fieldEngine" name="engine_type" 
-                                       value="<?= htmlspecialchars($_POST['engine_type'] ?? ($item['engine_type'] ?? '')); ?>" placeholder="e.g. 1.8L Hybrid, V8, Electric">
+                                       value="<?= safe_html($_POST['engine_type'] ?? ($item['engine_type'] ?? '')); ?>" placeholder="e.g. 1.8L Hybrid, V8, Electric">
                             </div>
 
                             <!-- 15. Color -->
                             <div class="col-md-3">
                                 <label for="fieldColor" class="form-label fw-semibold text-secondary small">Color</label>
                                 <input type="text" class="form-control" id="fieldColor" name="color" 
-                                       value="<?= htmlspecialchars($_POST['color'] ?? ($item['color'] ?? '')); ?>" placeholder="e.g. Midnight Black, Emerald">
+                                       value="<?= safe_html($_POST['color'] ?? ($item['color'] ?? '')); ?>" placeholder="e.g. Midnight Black, Emerald">
                             </div>
                         </div>
                     </div>
@@ -1331,7 +1353,7 @@ include_once __DIR__ . '/../includes/header.php';
                             <div class="col-md-6">
                                 <label for="fieldAddress" class="form-label fw-semibold text-secondary small">Street / Warehouse Address</label>
                                 <input type="text" class="form-control" id="fieldAddress" name="location_address" 
-                                       value="<?= htmlspecialchars($_POST['location_address'] ?? ($item['location_address'] ?? '')); ?>" placeholder="Plot 12-B, Industrial Area">
+                                       value="<?= safe_html($_POST['location_address'] ?? ($item['location_address'] ?? '')); ?>" placeholder="Plot 12-B, Industrial Area">
                             </div>
 
                             <!-- 17. City -->
@@ -1340,42 +1362,42 @@ include_once __DIR__ . '/../includes/header.php';
                                     City <span class="text-danger">*</span>
                                 </label>
                                 <input type="text" class="form-control" id="fieldCity" name="city" 
-                                       value="<?= htmlspecialchars($_POST['city'] ?? ($item['city'] ?: ($item['location_city'] ?? 'Karachi'))); ?>" required>
+                                       value="<?= safe_html($_POST['city'] ?? ($item['city'] ?? ($item['location_city'] ?? 'Karachi'))); ?>" required>
                             </div>
 
                             <!-- 18. Area -->
                             <div class="col-md-3">
                                 <label for="fieldArea" class="form-label fw-semibold text-secondary small">District / Area</label>
                                 <input type="text" class="form-control" id="fieldArea" name="area" 
-                                       value="<?= htmlspecialchars($_POST['area'] ?? ($item['area'] ?? '')); ?>" placeholder="e.g. DHA Phase 6, Gulberg">
+                                       value="<?= safe_html($_POST['area'] ?? ($item['area'] ?? '')); ?>" placeholder="e.g. DHA Phase 6, Gulberg">
                             </div>
 
                             <!-- 19. State -->
                             <div class="col-md-3">
                                 <label for="fieldState" class="form-label fw-semibold text-secondary small">Province / State</label>
                                 <input type="text" class="form-control" id="fieldState" name="location_state" 
-                                       value="<?= htmlspecialchars($_POST['location_state'] ?? ($item['location_state'] ?? '')); ?>" placeholder="e.g. Sindh, Punjab">
+                                       value="<?= safe_html($_POST['location_state'] ?? ($item['location_state'] ?? '')); ?>" placeholder="e.g. Sindh, Punjab">
                             </div>
 
                             <!-- 20. Country -->
                             <div class="col-md-3">
                                 <label for="fieldCountry" class="form-label fw-semibold text-secondary small">Country</label>
                                 <input type="text" class="form-control" id="fieldCountry" name="location_country" 
-                                       value="<?= htmlspecialchars($_POST['location_country'] ?? ($item['location_country'] ?? 'Pakistan')); ?>">
+                                       value="<?= safe_html($_POST['location_country'] ?? ($item['location_country'] ?? 'Pakistan')); ?>">
                             </div>
 
                             <!-- 21. Latitude -->
                             <div class="col-md-3">
                                 <label for="fieldLat" class="form-label fw-semibold text-secondary small">Latitude (GPS)</label>
                                 <input type="number" step="0.00000001" class="form-control" id="fieldLat" name="location_lat" 
-                                       value="<?= htmlspecialchars((string)($_POST['location_lat'] ?? ($item['location_lat'] ?? ''))); ?>" placeholder="24.8607">
+                                       value="<?= safe_html($_POST['location_lat'] ?? ($item['location_lat'] ?? '')); ?>" placeholder="24.8607">
                             </div>
 
                             <!-- 22. Longitude -->
                             <div class="col-md-3">
                                 <label for="fieldLng" class="form-label fw-semibold text-secondary small">Longitude (GPS)</label>
                                 <input type="number" step="0.00000001" class="form-control" id="fieldLng" name="location_lng" 
-                                       value="<?= htmlspecialchars((string)($_POST['location_lng'] ?? ($item['location_lng'] ?? ''))); ?>" placeholder="67.0011">
+                                       value="<?= safe_html($_POST['location_lng'] ?? ($item['location_lng'] ?? '')); ?>" placeholder="67.0011">
                             </div>
                         </div>
                     </div>
@@ -1397,7 +1419,7 @@ include_once __DIR__ . '/../includes/header.php';
                                        class="form-control <?= $has_bids ? 'readonly-lock' : ''; ?>" 
                                        id="fieldStartTime" 
                                        name="start_time" 
-                                       value="<?= htmlspecialchars($_POST['start_time'] ?? $start_val); ?>" 
+                                       value="<?= safe_html($_POST['start_time'] ?? $start_val); ?>" 
                                        <?= $has_bids ? 'readonly tabindex="-1"' : 'required'; ?>>
                                 <div class="form-text"><?= $has_bids ? 'Locked: Bidding has started' : 'Bidding opens at this time.'; ?></div>
                             </div>
@@ -1411,7 +1433,7 @@ include_once __DIR__ . '/../includes/header.php';
                                        class="form-control" 
                                        id="fieldEndTime" 
                                        name="end_time" 
-                                       value="<?= htmlspecialchars($_POST['end_time'] ?? $end_val); ?>" 
+                                       value="<?= safe_html($_POST['end_time'] ?? $end_val); ?>" 
                                        required>
                                 <div class="form-text">Auction automatically closes and concludes.</div>
                             </div>
@@ -1420,7 +1442,7 @@ include_once __DIR__ . '/../includes/header.php';
                             <div class="col-md-4">
                                 <label for="fieldStatus" class="form-label fw-semibold text-secondary small">Listing Status</label>
                                 <?php 
-                                    $curr_status = $_POST['status'] ?? $item['status'];
+                                    $curr_status = $_POST['status'] ?? ($item['status'] ?? 'active');
                                     $status_list = ['active' => 'Active (Open for Bids)', 'paused' => 'Paused (Bidding Suspended)', 'cancelled' => 'Cancelled'];
                                     if ($is_admin) {
                                         $status_list['pending'] = 'Pending Review';
@@ -1443,7 +1465,7 @@ include_once __DIR__ . '/../includes/header.php';
                                     <!-- 26. Featured -->
                                     <div class="form-check form-switch mb-0">
                                         <input class="form-check-input" type="checkbox" role="switch" id="fieldFeatured" name="featured" value="1"
-                                               <?= ((int)($_POST['featured'] ?? $item['featured']) === 1) ? 'checked' : ''; ?>>
+                                               <?= ((int)($_POST['featured'] ?? ($item['featured'] ?? 0)) === 1) ? 'checked' : ''; ?>>
                                         <label class="form-check-label fw-semibold text-dark small" for="fieldFeatured">
                                             Promote to Featured Lots Showcase
                                         </label>
@@ -1453,7 +1475,7 @@ include_once __DIR__ . '/../includes/header.php';
                                     <?php if ($is_admin): ?>
                                         <div class="form-check form-switch mb-0 border-start ps-4">
                                             <input class="form-check-input" type="checkbox" role="switch" id="fieldApproved" name="approved" value="1"
-                                                   <?= ((int)($_POST['approved'] ?? $item['approved']) === 1) ? 'checked' : ''; ?>>
+                                                   <?= ((int)($_POST['approved'] ?? ($item['approved'] ?? 0)) === 1) ? 'checked' : ''; ?>>
                                             <label class="form-check-label fw-semibold text-dark small" for="fieldApproved">
                                                 Admin Official Verification & Approval
                                             </label>
@@ -1461,8 +1483,8 @@ include_once __DIR__ . '/../includes/header.php';
                                     <?php else: ?>
                                         <div class="text-muted small border-start ps-3">
                                             Approval Status: 
-                                            <span class="badge <?= (int)$item['approved'] === 1 ? 'bg-success' : 'bg-warning text-dark'; ?>">
-                                                <?= (int)$item['approved'] === 1 ? 'Approved' : 'Pending Review'; ?>
+                                            <span class="badge <?= (int)($item['approved'] ?? 0) === 1 ? 'bg-success' : 'bg-warning text-dark'; ?>">
+                                                <?= (int)($item['approved'] ?? 0) === 1 ? 'Approved' : 'Pending Review'; ?>
                                             </span>
                                         </div>
                                     <?php endif; ?>
@@ -1483,21 +1505,21 @@ include_once __DIR__ . '/../includes/header.php';
                             <div class="col-md-6">
                                 <label for="fieldMetaTitle" class="form-label fw-semibold text-secondary small">Meta Title</label>
                                 <input type="text" class="form-control" id="fieldMetaTitle" name="meta_title" 
-                                       value="<?= htmlspecialchars($_POST['meta_title'] ?? ($item['meta_title'] ?? '')); ?>" placeholder="Custom title for Google search results">
+                                       value="<?= safe_html($_POST['meta_title'] ?? ($item['meta_title'] ?? '')); ?>" placeholder="Custom title for Google search results">
                             </div>
 
                             <!-- 30. Meta Keywords -->
                             <div class="col-md-6">
                                 <label for="fieldMetaKeywords" class="form-label fw-semibold text-secondary small">Meta Keywords</label>
                                 <input type="text" class="form-control" id="fieldMetaKeywords" name="meta_keywords" 
-                                       value="<?= htmlspecialchars($_POST['meta_keywords'] ?? ($item['meta_keywords'] ?? '')); ?>" placeholder="auction, vehicle, luxury, rolex">
+                                       value="<?= safe_html($_POST['meta_keywords'] ?? ($item['meta_keywords'] ?? '')); ?>" placeholder="auction, vehicle, luxury, rolex">
                             </div>
 
                             <!-- 29. Meta Description -->
                             <div class="col-12">
                                 <label for="fieldMetaDesc" class="form-label fw-semibold text-secondary small">Meta Description</label>
                                 <textarea class="form-control" id="fieldMetaDesc" name="meta_description" rows="2" 
-                                          placeholder="A concise summary of this listing for search engines (max 160 characters)..."><?= htmlspecialchars($_POST['meta_description'] ?? ($item['meta_description'] ?? '')); ?></textarea>
+                                          placeholder="A concise summary of this listing for search engines (max 160 characters)..."><?= safe_html($_POST['meta_description'] ?? ($item['meta_description'] ?? '')); ?></textarea>
                             </div>
                         </div>
                     </div>
@@ -1721,6 +1743,26 @@ document.addEventListener('DOMContentLoaded', function () {
     if (initialItem) {
         selectCategory(initialItem.dataset.catId, initialItem.dataset.catName, initialItem.dataset.catIcon);
     }
+});
+</script>
+
+<script src="../assets/js/ai_reserve_price.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    AiReservePrice.init({
+        triggerBtnId:      'btnAiReserve',
+        containerId:       'aiReserveContainer',
+        reserveInputId:    'fieldReservePrice',
+        startingInputId:   'fieldStartingPrice',
+        categorySelectId:  'fieldCategory',
+        brandInputId:      'fieldBrand',
+        modelInputId:      'fieldModel',
+        yearInputId:       'fieldYear',
+        conditionSelectId: 'fieldCondition',
+        cityInputId:       'fieldCity',
+        itemId:            <?= (int)($item['id'] ?? 0); ?>,
+        apiUrl:            '../ajax/ai_reserve_price.php'
+    });
 });
 </script>
 

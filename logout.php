@@ -4,6 +4,25 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+// Invalidate persistent remember-me token in database
+if (!empty($_SESSION['user_id'])) {
+    try {
+        require_once __DIR__ . '/includes/Database.php';
+        $pdo = Database::getPdo();
+        $pdo->prepare("UPDATE users SET remember_token = NULL WHERE id = :id")
+            ->execute([':id' => (int)$_SESSION['user_id']]);
+    } catch (\Throwable $e) {
+        error_log("Failed to clear remember_token on logout: " . $e->getMessage());
+    }
+}
+
+// Delete remember-me cookie
+if (isset($_COOKIE['geo_remember'])) {
+    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443);
+    setcookie('geo_remember', '', time() - 3600, '/', '', $isHttps, true);
+    unset($_COOKIE['geo_remember']);
+}
+
 // Unset all session variables
 $_SESSION = array();
 
@@ -24,6 +43,7 @@ if (ini_get("session.use_cookies")) {
 // Destroy session
 session_unset();
 session_destroy();
+
 
 // Prevent caching of logout response
 header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");

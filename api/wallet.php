@@ -27,14 +27,13 @@ if ($user_id <= 0) {
     if (preg_match('/Bearer\s+(\S+)/', $auth, $matches)) {
         // Token auth lookup simulation
         $token = $matches[1];
-        $t_stmt = mysqli_prepare($conn, "SELECT id FROM users WHERE remember_token = ? LIMIT 1");
-        mysqli_stmt_bind_param($t_stmt, "s", $token);
-        mysqli_stmt_execute($t_stmt);
-        $t_row = mysqli_fetch_assoc(mysqli_stmt_get_result($t_stmt));
+        $pdo = Database::getPdo();
+        $t_stmt = $pdo->prepare("SELECT id FROM users WHERE remember_token = ? LIMIT 1");
+        $t_stmt->execute([$token]);
+        $t_row = $t_stmt->fetch(PDO::FETCH_ASSOC);
         if ($t_row) {
             $user_id = (int)$t_row['id'];
         }
-        mysqli_stmt_close($t_stmt);
     }
 }
 
@@ -144,34 +143,58 @@ try {
             }
 
             // Process withdrawal in transaction
-            mysqli_begin_transaction($conn);
-            $w_stmt = mysqli_prepare($conn, "SELECT balance FROM users WHERE id = ? FOR UPDATE");
-            mysqli_stmt_bind_param($w_stmt, "i", $user_id);
-            mysqli_stmt_execute($w_stmt);
-            $curr_b = (float)(mysqli_fetch_assoc(mysqli_stmt_get_result($w_stmt))['balance'] ?? 0);
-            mysqli_stmt_close($w_stmt);
-
-            $new_b = $curr_b - $amount;
-            $u_up = mysqli_prepare($conn, "UPDATE users SET balance = ? WHERE id = ?");
-            mysqli_stmt_bind_param($u_up, "di", $new_b, $user_id);
-            mysqli_stmt_execute($u_up);
-            mysqli_stmt_close($u_up);
-
-            // Also update wallets table if exists
-            mysqli_query($conn, "UPDATE wallets SET available_balance = $new_b WHERE user_id = $user_id");
-
             $payout_ref = 'WD-' . strtoupper(substr(uniqid(), -8));
             $desc = "Withdrawal to " . $bank_name . " (" . $acc_title . " - " . $acc_num . ")";
-            $tx_stmt = mysqli_prepare($conn, "
-                INSERT INTO transactions (user_id, type, amount, balance_before, balance_after, reference_id, description, status, created_at)
-                VALUES (?, 'withdraw', ?, ?, ?, ?, ?, 'pending', NOW())
-            ");
             $neg_amount = -$amount;
-            mysqli_stmt_bind_param($tx_stmt, "idddss", $user_id, $neg_amount, $curr_b, $new_b, $payout_ref, $desc);
-            mysqli_stmt_execute($tx_stmt);
-            mysqli_stmt_close($tx_stmt);
 
-            mysqli_commit($conn);
+            if (isset($pdo) && $pdo instanceof PDO) {
+                $pdo->beginTransaction();
+                $w_stmt = $pdo->prepare("SELECT balance FROM users WHERE id = ? FOR UPDATE");
+                $w_stmt->execute([$user_id]);
+                $curr_b = (float)($w_stmt->fetchColumn() ?: 0);
+
+                $new_b = $curr_b - $amount;
+                $u_up = $pdo->prepare("UPDATE users SET balance = ? WHERE id = ?");
+                $u_up->execute([$new_b, $user_id]);
+
+                try {
+                    $w_up = $pdo->prepare("UPDATE wallets SET available_balance = ? WHERE user_id = ?");
+                    $w_up->execute([$new_b, $user_id]);
+                } catch (\Throwable $ignored) {}
+
+                $tx_stmt = $pdo->prepare("
+                    INSERT INTO transactions (user_id, type, amount, balance_before, balance_after, reference_id, description, status, created_at)
+                    VALUES (?, 'withdraw', ?, ?, ?, ?, ?, 'pending', NOW())
+                ");
+                $tx_stmt->execute([$user_id, $neg_amount, $curr_b, $new_b, $payout_ref, $desc]);
+                $pdo->commit();
+            } else {
+                mysqli_begin_transaction($conn);
+                $w_stmt = mysqli_prepare($conn, "SELECT balance FROM users WHERE id = ? FOR UPDATE");
+                mysqli_stmt_bind_param($w_stmt, "i", $user_id);
+                mysqli_stmt_execute($w_stmt);
+                $curr_b = (float)(mysqli_fetch_assoc(mysqli_stmt_get_result($w_stmt))['balance'] ?? 0);
+                mysqli_stmt_close($w_stmt);
+
+                $new_b = $curr_b - $amount;
+                $u_up = mysqli_prepare($conn, "UPDATE users SET balance = ? WHERE id = ?");
+                mysqli_stmt_bind_param($u_up, "di", $new_b, $user_id);
+                mysqli_stmt_execute($u_up);
+                mysqli_stmt_close($u_up);
+
+                // Also update wallets table if exists
+                @mysqli_query($conn, "UPDATE wallets SET available_balance = $new_b WHERE user_id = $user_id");
+
+                $tx_stmt = mysqli_prepare($conn, "
+                    INSERT INTO transactions (user_id, type, amount, balance_before, balance_after, reference_id, description, status, created_at)
+                    VALUES (?, 'withdraw', ?, ?, ?, ?, ?, 'pending', NOW())
+                ");
+                mysqli_stmt_bind_param($tx_stmt, "idddss", $user_id, $neg_amount, $curr_b, $new_b, $payout_ref, $desc);
+                mysqli_stmt_execute($tx_stmt);
+                mysqli_stmt_close($tx_stmt);
+
+                mysqli_commit($conn);
+            }
 
             http_response_code(202);
             echo json_encode([
@@ -198,21 +221,36 @@ try {
             $limit = min(100, max(1, (int)($_GET['limit'] ?? 20)));
             $offset = ($page - 1) * $limit;
 
-            $stmt = mysqli_prepare($conn, "
-                SELECT id, type, amount, balance_before, balance_after, reference_id, description, status, created_at
-                FROM transactions
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-                LIMIT ? OFFSET ?
-            ");
-            mysqli_stmt_bind_param($stmt, "iii", $user_id, $limit, $offset);
-            mysqli_stmt_execute($stmt);
-            $res = mysqli_stmt_get_result($stmt);
             $items = [];
-            while ($row = mysqli_fetch_assoc($res)) {
-                $items[] = $row;
+            if (isset($pdo) && $pdo instanceof PDO) {
+                $stmt = $pdo->prepare("
+                    SELECT id, type, amount, balance_before, balance_after, reference_id, description, status, created_at
+                    FROM transactions
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?
+                ");
+                $stmt->bindValue(1, $user_id, PDO::PARAM_INT);
+                $stmt->bindValue(2, $limit, PDO::PARAM_INT);
+                $stmt->bindValue(3, $offset, PDO::PARAM_INT);
+                $stmt->execute();
+                $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            } else {
+                $stmt = mysqli_prepare($conn, "
+                    SELECT id, type, amount, balance_before, balance_after, reference_id, description, status, created_at
+                    FROM transactions
+                    WHERE user_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?
+                ");
+                mysqli_stmt_bind_param($stmt, "iii", $user_id, $limit, $offset);
+                mysqli_stmt_execute($stmt);
+                $res = mysqli_stmt_get_result($stmt);
+                while ($row = mysqli_fetch_assoc($res)) {
+                    $items[] = $row;
+                }
+                mysqli_stmt_close($stmt);
             }
-            mysqli_stmt_close($stmt);
 
             http_response_code(200);
             echo json_encode([

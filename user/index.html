@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title id="pageTitle">Connecting to Dashboard - Geo Auction System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        :root {
+            --primary: #047857;
+            --primary-hover: #065f46;
+            --surface: #ffffff;
+            --bg: #f8fafc;
+            --text: #0f172a;
+            --muted: #64748b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #022c22 0%, #064e3b 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            color: var(--text);
+        }
+
+        .redirect-card {
+            background: rgba(255, 255, 255, 0.98);
+            backdrop-filter: blur(12px);
+            border-radius: 20px;
+            padding: 40px 36px;
+            max-width: 440px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.35);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            animation: cardEntrance 0.35s ease-out;
+        }
+
+        @keyframes cardEntrance {
+            from {
+                opacity: 0;
+                transform: translateY(16px) scale(0.97);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        .icon-wrap {
+            width: 72px;
+            height: 72px;
+            margin: 0 auto 20px;
+            border-radius: 50%;
+            background: #ecfdf5;
+            border: 2px solid #a7f3d0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--primary);
+            font-size: 28px;
+            position: relative;
+            box-shadow: 0 8px 20px rgba(4, 120, 87, 0.15);
+        }
+
+        .icon-pulse {
+            position: absolute;
+            inset: -6px;
+            border-radius: 50%;
+            border: 2px solid var(--primary);
+            opacity: 0.4;
+            animation: pulseRing 1.8s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
+        }
+
+        @keyframes pulseRing {
+            0% {
+                transform: scale(0.95);
+                opacity: 0.8;
+            }
+
+            50% {
+                transform: scale(1.15);
+                opacity: 0;
+            }
+
+            100% {
+                transform: scale(1.15);
+                opacity: 0;
+            }
+        }
+
+        h2 {
+            font-size: 20px;
+            font-weight: 800;
+            color: var(--text);
+            margin-bottom: 8px;
+            letter-spacing: -0.3px;
+        }
+
+        p {
+            font-size: 13.5px;
+            color: var(--muted);
+            line-height: 1.5;
+            margin-bottom: 24px;
+        }
+
+        .progress-bar-wrap {
+            width: 100%;
+            height: 6px;
+            background: #e2e8f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 24px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            width: 30%;
+            background: linear-gradient(90deg, #047857, #10b981);
+            border-radius: 10px;
+            animation: loadBar 1.2s infinite ease-in-out;
+        }
+
+        @keyframes loadBar {
+            0% {
+                transform: translateX(-100%);
+                width: 25%;
+            }
+
+            50% {
+                width: 60%;
+            }
+
+            100% {
+                transform: translateX(400%);
+                width: 25%;
+            }
+        }
+
+        .btn-manual {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #ffffff;
+            background: var(--primary);
+            text-decoration: none;
+            padding: 10px 22px;
+            border-radius: 10px;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 12px rgba(4, 120, 87, 0.25);
+        }
+
+        .btn-manual:hover {
+            background: var(--primary-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 16px rgba(4, 120, 87, 0.35);
+        }
+    </style>
+    <script>
+        (function () {
+            var params = new URLSearchParams(window.location.search);
+            var targetId = params.get('contact_id') || params.get('user_id');
+            var itemId = params.get('item_id');
+
+            var targetUrl = 'dashboard.php';
+            var isChat = false;
+
+            if (targetId) {
+                isChat = true;
+                targetUrl = '../messages.php?user_id=' + encodeURIComponent(targetId);
+                if (itemId) {
+                    targetUrl += '&item_id=' + encodeURIComponent(itemId);
+                }
+            }
+
+            window.targetDestinationUrl = targetUrl;
+            window.isChatRedirect = isChat;
+
+            // Immediately dispatch redirection
+            setTimeout(function () {
+                window.location.replace(targetUrl);
+            }, 120);
+        })();
+    </script>
+</head>
+
+<body>
+    <noscript>
+        <meta http-equiv="refresh" content="0;url=dashboard.php">
+    </noscript>
+    <div class="redirect-card">
+        <div class="icon-wrap">
+            <div class="icon-pulse"></div>
+            <i id="redirectIcon" class="fa-solid fa-gauge-high"></i>
+        </div>
+        <h2 id="redirectHeading">Connecting to Dashboard</h2>
+        <p id="redirectDesc">Redirecting you to your user dashboard...</p>
+        <div class="progress-bar-wrap">
+            <div class="progress-bar-fill"></div>
+        </div>
+        <div>
+            <a href="dashboard.php" id="manualLink" class="btn-manual">
+                <span id="manualBtnText">Continue to Dashboard</span>
+                <i class="fa-solid fa-arrow-right"></i>
+            </a>
+        </div>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            var link = document.getElementById('manualLink');
+            var icon = document.getElementById('redirectIcon');
+            var heading = document.getElementById('redirectHeading');
+            var desc = document.getElementById('redirectDesc');
+            var btnText = document.getElementById('manualBtnText');
+            var pageTitle = document.getElementById('pageTitle');
+
+            if (window.isChatRedirect) {
+                if (icon) icon.className = 'fa-solid fa-comments';
+                if (heading) heading.textContent = 'Connecting to Conversation';
+                if (desc) desc.textContent = 'Redirecting you to the live negotiation portal...';
+                if (btnText) btnText.textContent = 'Continue to Chat';
+                if (pageTitle) pageTitle.textContent = 'Connecting to Messages - Geo Auction System';
+            }
+
+            if (link && window.targetDestinationUrl) {
+                link.href = window.targetDestinationUrl;
+            }
+        });
+    </script>
+</body>
+
+</html>

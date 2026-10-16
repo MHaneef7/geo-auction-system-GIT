@@ -1,55 +1,24 @@
 <?php
-/**
- * ============================================================================
- * File: index.php
- * Path: /index.php (Project Root)
- * Description: Main Public Entry Point & Live Auction Discovery Platform
- * Technologies: PHP, MySQLi/PDO, Bootstrap 5, Vanilla CSS, FontAwesome 6, AJAX
- * Architecture: Senior PHP Full-Stack Standards
- * ============================================================================
- */
-
-include_once __DIR__ . '/includes/database.php';
-include_once __DIR__ . '/includes/components/item_card.php';
-
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-
-$is_logged  = !empty($_SESSION['user_id']);
-$user_id    = $is_logged ? (int)$_SESSION['user_id'] : 0;
-$user_name  = $_SESSION['user_name'] ?? ($_SESSION['name'] ?? '');
-$user_init  = $is_logged ? strtoupper(substr($user_name, 0, 2)) : '';
-$user_role  = strtolower(trim($_SESSION['role'] ?? $_SESSION['user_role'] ?? 'buyer'));
-
-// Fetch user wallet balance if authenticated
-$user_balance = 0.00;
-if ($is_logged && isset($conn) && $conn instanceof mysqli && !@$conn->connect_error) {
-    $bal_stmt = mysqli_prepare($conn, "SELECT balance FROM users WHERE id = ? LIMIT 1");
-    if ($bal_stmt) {
-        mysqli_stmt_bind_param($bal_stmt, "i", $user_id);
-        mysqli_stmt_execute($bal_stmt);
-        $bal_res = mysqli_stmt_get_result($bal_stmt);
-        if ($bal_row = mysqli_fetch_assoc($bal_res)) {
-            $user_balance = (float)($bal_row['balance'] ?? 0);
-        }
-        mysqli_stmt_close($bal_stmt);
+    include_once ('includes/database.php');
+    include_once ('includes/components/item_card.php');
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
     }
-}
+    $is_logged  = !empty($_SESSION['user_id']);
+    $user_id    = $is_logged ? (int)$_SESSION['user_id'] : 0;
+    $user_name  = $_SESSION['user_name'] ?? ($_SESSION['name'] ?? '');
+    $user_init  = $is_logged ? strtoupper(substr($user_name, 0, 2)) : '';
+    $user_role  = $is_logged ? strtolower(trim($_SESSION['role'] ?? $_SESSION['user_role'] ?? 'buyer')) : 'guest';
 
-// -----------------------------------------------------------------------------
-// Database Queries with Safe Fallbacks & Graceful Error Handling
-// -----------------------------------------------------------------------------
-$featured_items = [];
-$categories     = [];
-$top_seller     = null;
-$live_count     = 0;
-$bid_count      = 0;
-$user_count     = 0;
+    $pdo = Database::getPdo();
+    $user_balance = 0.00;
+    if ($is_logged) {
+        $bal_stmt = $pdo->prepare("SELECT balance FROM users WHERE id = :id LIMIT 1");
+        $bal_stmt->execute([':id' => $user_id]);
+        $user_balance = (float)($bal_stmt->fetchColumn() ?? 0.0);
+    }
 
-if (isset($conn) && $conn instanceof mysqli && !@$conn->connect_error) {
-    // 1. Live Featured Auctions Query
-    $featured_sql = "
+    $featured_stmt = $pdo->query("
         SELECT i.*, c.name AS cat_name, u.name AS seller_name,
             COUNT(b.id) AS bid_count,
             MAX(b.bid_amount) AS max_bid
@@ -61,952 +30,1176 @@ if (isset($conn) && $conn instanceof mysqli && !@$conn->connect_error) {
         GROUP BY i.id
         ORDER BY bid_count DESC, i.created_at DESC
         LIMIT 8
-    ";
-    $featured_res = @mysqli_query($conn, $featured_sql);
-    if ($featured_res) {
-        while ($row = mysqli_fetch_assoc($featured_res)) {
-            $featured_items[] = $row;
-        }
-    }
+    ");
+    $featured_items = $featured_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // 2. Categories with active item counts
-    $cats_sql = "
+    $cats_stmt = $pdo->query("
         SELECT c.*, COUNT(i.id) AS item_count
         FROM categories c
         LEFT JOIN items i ON i.category_id = c.id AND i.status = 'active' AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
         GROUP BY c.id
-        ORDER BY item_count DESC, c.name ASC
-        LIMIT 8
-    ";
-    $cats_res = @mysqli_query($conn, $cats_sql);
-    if ($cats_res) {
-        while ($row = mysqli_fetch_assoc($cats_res)) {
-            $categories[] = $row;
-        }
-    }
-
-    // 3. Top Trusted Seller
-    $seller_sql = "
-        SELECT u.id, u.name, COUNT(i.id) AS item_count
-        FROM users u
-        JOIN items i ON i.seller_id = u.id AND i.status IN ('active','ended') AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
-        GROUP BY u.id
         ORDER BY item_count DESC
-        LIMIT 1
-    ";
-    $seller_res = @mysqli_query($conn, $seller_sql);
-    if ($seller_res && $seller_row = mysqli_fetch_assoc($seller_res)) {
-        $top_seller = $seller_row;
-    }
+        LIMIT 8
+    ");
+    $categories = $cats_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // 4. Platform Metrics & Stats
-    $stats_res = @mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)");
-    if ($stats_res && $r = mysqli_fetch_assoc($stats_res)) {
-        $live_count = (int)$r['c'];
-    }
+    $sellers_stmt = $pdo->query("
+        SELECT u.id, u.name, u.avatar, COUNT(i.id) AS item_count
+        FROM users u
+        LEFT JOIN items i ON i.seller_id = u.id AND i.status IN ('active','ended') AND (i.is_deleted = 0 OR i.is_deleted IS NULL)
+        WHERE u.role IN ('seller', 'admin')
+        GROUP BY u.id
+        ORDER BY item_count DESC, u.id ASC
+        LIMIT 4
+    ");
+    $top_sellers = $sellers_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    $ubids_res = @mysqli_query($conn, "SELECT COUNT(*) AS c FROM bids");
-    if ($ubids_res && $r = mysqli_fetch_assoc($ubids_res)) {
-        $bid_count = (int)$r['c'];
-    }
-
-    $usr_res = @mysqli_query($conn, "SELECT COUNT(*) AS c FROM users");
-    if ($usr_res && $r = mysqli_fetch_assoc($usr_res)) {
-        $user_count = (int)$r['c'];
-    }
-}
-
-// Fallback mock items for Hero showcase if DB has fewer than 3 active listings
-if (empty($featured_items)) {
-    $fallback_hero_items = [
-        [
-            'id'             => 1,
-            'title'          => 'Rolex Submariner Date 41mm Oystersteel',
-            'starting_price' => 1250000.00,
-            'current_price'  => 1420000.00,
-            'max_bid'        => 1420000.00,
-            'bid_count'      => 34,
-            'end_time'       => date('Y-m-d H:i:s', time() + 18400),
-            'featured_image' => 'https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9?auto=format&fit=crop&w=600&q=80',
-            'images'         => '',
-            'cat_name'       => 'Watches & Jewelry',
-            'seller_name'    => 'Premier Vault'
-        ],
-        [
-            'id'             => 2,
-            'title'          => '2022 Porsche 911 Carrera S Coupe',
-            'starting_price' => 32000000.00,
-            'current_price'  => 36500000.00,
-            'max_bid'        => 36500000.00,
-            'bid_count'      => 48,
-            'end_time'       => date('Y-m-d H:i:s', time() + 7200),
-            'featured_image' => 'https://images.unsplash.com/photo-1503376780353-7e6692767b70?auto=format&fit=crop&w=600&q=80',
-            'images'         => '',
-            'cat_name'       => 'Vehicles',
-            'seller_name'    => 'Motors Exotics'
-        ],
-        [
-            'id'             => 3,
-            'title'          => 'DJI Inspire 3 Cinema Drone Pro Kit',
-            'starting_price' => 1800000.00,
-            'current_price'  => 2100000.00,
-            'max_bid'        => 2100000.00,
-            'bid_count'      => 19,
-            'end_time'       => date('Y-m-d H:i:s', time() + 32000),
-            'featured_image' => 'https://images.unsplash.com/photo-1527977966376-1c8408f9f108?auto=format&fit=crop&w=600&q=80',
-            'images'         => '',
-            'cat_name'       => 'Electronics',
-            'seller_name'    => 'AeroTech Studio'
-        ]
-    ];
-    $hero_items = $fallback_hero_items;
-} else {
-    $hero_items = array_slice($featured_items, 0, 3);
-}
+    $live_count = (int)($pdo->query("SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)")->fetchColumn() ?? 0);
+    $bid_count  = (int)($pdo->query("SELECT COUNT(*) AS c FROM bids")->fetchColumn() ?? 0);
+    $user_count = (int)($pdo->query("SELECT COUNT(*) AS c FROM users")->fetchColumn() ?? 0);
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Geo Auction – Discover, bid, and win on live auctions in real-time. Verified sellers, secure wallet, and instant bidding on vehicles, electronics, jewelry, and more.">
+    <title>Geo Auction – Live Bidding Platform</title>
     
-    <!-- Primary SEO Meta Tags -->
-    <title>Geo Auction – Real-Time Live Bidding & Marketplace</title>
-    <meta name="title" content="Geo Auction – Real-Time Live Bidding & Marketplace">
-    <meta name="description" content="Discover, bid, and win on thousands of live auctions in real-time. Verified sellers, secure wallet escrow, and transparent bidding across hundreds of categories.">
-    <meta name="keywords" content="geo auction, live bidding, online auction, buy and sell, pakistan auctions, vehicle auction, watch auction">
-    <meta name="author" content="Geo Auction Team">
-    <meta name="robots" content="index, follow">
-    <meta name="theme-color" content="#047857">
-
-    <!-- Open Graph / Facebook / WhatsApp -->
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="http://localhost/geo-auction-system/">
-    <meta property="og:title" content="Geo Auction – Real-Time Live Bidding Platform">
-    <meta property="og:description" content="Discover, bid, and win on verified live auctions with instant wallet settlement and live countdowns.">
-    <meta property="og:image" content="assets/image/Geo-auction.png">
-
-    <!-- Twitter Meta -->
-    <meta property="twitter:card" content="summary_large_image">
-    <meta property="twitter:title" content="Geo Auction – Real-Time Live Bidding Platform">
-    <meta property="twitter:description" content="Discover, bid, and win on verified live auctions with instant wallet settlement.">
-    <meta property="twitter:image" content="assets/image/Geo-auction.png">
-
-    <!-- Favicon -->
-    <link rel="icon" type="image/png" href="assets/image/Geo-auction.png">
-
-    <!-- Google Fonts: Plus Jakarta Sans & Inter -->
+    <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-
-    <!-- Bootstrap 5.3 CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-
-    <!-- FontAwesome 6 Icons -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-
-    <!-- SweetAlert2 for Modern Interactive Dialogs -->
-    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
-
-    <!-- Project Stylesheets -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+    
+    <!-- Core & Library Styles -->
     <link rel="stylesheet" href="assets/css/main.css">
     <link rel="stylesheet" href="assets/css/style.css">
-
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
     <style>
+        /* ── Modern Design Variables & Overrides ── */
         :root {
             --primary: #047857;
-            --primary-dark: #065f46;
+            --primary-hover: #065f46;
             --primary-light: #ecfdf5;
-            --primary-ring: rgba(4, 120, 87, 0.25);
+            --primary-glow: rgba(4, 120, 87, 0.25);
             --gold: #f59e0b;
-            --gold-hover: #d97706;
-            --dark: #0f172a;
-            --body-bg: #f8fafc;
-            --card-border: #e2e8f0;
-            --text-main: #0f172a;
-            --text-muted: #64748b;
-        }
-
-        body {
-            font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, sans-serif;
-            background-color: var(--body-bg);
-            color: var(--text-main);
-            overflow-x: hidden;
+            --gold-light: #fef3c7;
+            --dark-surface: #0f172a;
+            --slate-800: #1e293b;
+            --slate-700: #334155;
+            --slate-100: #f1f5f9;
+            --slate-50: #f8fafc;
+            --text-heading: #0f172a;
+            --text-body: #475569;
+            --radius-md: 10px;
+            --radius-lg: 14px;
+            --radius-xl: 20px;
+            --shadow-subtle: 0 4px 20px -2px rgba(15, 23, 42, 0.05);
+            --shadow-card: 0 10px 30px -4px rgba(15, 23, 42, 0.08);
+            --shadow-hover: 0 20px 40px -6px rgba(4, 120, 87, 0.16);
         }
 
         html {
             scroll-behavior: smooth;
         }
 
-        /* ── Emerald Brand Theme Classes ── */
-        .text-emerald { color: var(--primary) !important; }
-        .bg-emerald { background-color: var(--primary) !important; }
-        .bg-emerald-light { background-color: var(--primary-light) !important; }
-        .border-emerald { border-color: var(--primary) !important; }
-
-        .btn-emerald {
-            background-color: var(--primary) !important;
-            border-color: var(--primary) !important;
-            color: #ffffff !important;
-            font-weight: 600;
-            transition: all 0.25s ease;
-        }
-        .btn-emerald:hover {
-            background-color: var(--primary-dark) !important;
-            border-color: var(--primary-dark) !important;
-            color: #ffffff !important;
-            box-shadow: 0 4px 14px var(--primary-ring);
-            transform: translateY(-1px);
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: #f8fafc;
+            color: var(--text-body);
+            overflow-x: hidden;
         }
 
-        .btn-outline-emerald {
-            border: 1.5px solid var(--primary) !important;
-            color: var(--primary) !important;
-            background: transparent !important;
-            font-weight: 600;
-            transition: all 0.25s ease;
-        }
-        .btn-outline-emerald:hover {
-            background-color: var(--primary) !important;
-            color: #ffffff !important;
-            box-shadow: 0 4px 14px var(--primary-ring);
-            transform: translateY(-1px);
-        }
-
-        /* ── Modern Navigation Bar ── */
+        /* ── Header & Navigation ── */
         .pub-nav {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border-bottom: 1px solid var(--card-border);
             position: sticky;
             top: 0;
-            z-index: 1040;
-            transition: all 0.3s ease;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            border-bottom: 1px solid rgba(226, 232, 240, 0.85);
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+            transition: all 0.25s ease;
         }
+
+        .pub-nav::after {
+            content: '';
+            display: block;
+            height: 3px;
+            background: linear-gradient(90deg, #047857 0%, #10b981 50%, #f59e0b 100%);
+        }
+
         .pub-nav-inner {
+            max-width: 1320px;
+            margin: 0 auto;
+            padding: 0 24px;
+            height: 74px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            max-width: 1320px;
-            margin: 0 auto;
-            padding: 12px 20px;
             gap: 20px;
+        }
+
+        /* Brand Logo Container */
+        .pub-logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+            flex-shrink: 0;
+            transition: transform 0.2s ease;
+        }
+        .pub-logo:hover {
+            transform: translateY(-1px);
         }
         .pub-logo img {
             height: 44px;
+            max-height: 48px;
             width: auto;
             object-fit: contain;
-            transition: transform 0.2s ease;
+            display: block;
         }
-        .pub-logo img:hover {
-            transform: scale(1.03);
-        }
+
+        /* Nav Links */
         .pub-nav-links {
             display: flex;
             align-items: center;
-            gap: 24px;
-            margin: 0;
+            gap: 6px;
         }
         .pub-nav-links a {
-            color: #334155;
+            padding: 8px 16px;
+            border-radius: 50px;
+            font-size: 14px;
             font-weight: 600;
-            font-size: 15px;
+            color: #475569;
             text-decoration: none;
-            position: relative;
-            padding: 6px 0;
-            transition: color 0.2s ease;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
         }
-        .pub-nav-links a:hover, .pub-nav-links a.active {
+        .pub-nav-links a:hover {
             color: var(--primary);
+            background: var(--primary-light);
         }
-        .pub-nav-links a.active::after {
-            content: '';
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            width: 100%;
-            height: 2.5px;
-            background: var(--primary);
-            border-radius: 2px;
+        .pub-nav-links a.active {
+            color: var(--primary);
+            background: var(--primary-light);
+            font-weight: 700;
         }
 
-        /* ── AJAX Live Search in Navbar ── */
-        .pub-search-box {
-            position: relative;
+        /* Header Search Form */
+        .pub-search-wrapper {
             flex: 1;
-            max-width: 360px;
+            max-width: 380px;
+            margin: 0 10px;
+            position: relative;
         }
-        .pub-search-box input {
-            width: 100%;
-            padding: 9px 16px 9px 38px;
-            font-size: 14px;
-            border-radius: 9999px;
-            border: 1px solid #cbd5e1;
-            background: #f1f5f9;
-            transition: all 0.2s ease;
-        }
-        .pub-search-box input:focus {
-            outline: none;
-            background: #fff;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px var(--primary-ring);
-        }
-        .pub-search-icon {
-            position: absolute;
-            left: 14px;
-            top: 50%;
-            transform: translateY(-50%);
-            color: #94a3b8;
-            pointer-events: none;
-            font-size: 14px;
-        }
-        .search-results-dropdown {
-            position: absolute;
-            top: calc(100% + 8px);
-            left: 0;
-            right: 0;
-            background: #ffffff;
-            border-radius: 12px;
-            border: 1px solid var(--card-border);
-            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.12);
-            max-height: 380px;
-            overflow-y: auto;
-            z-index: 1050;
-            display: none;
-        }
-        .search-result-item {
+        .pub-search-form {
+            position: relative;
             display: flex;
             align-items: center;
-            justify-content: space-between;
-            padding: 10px 16px;
-            border-bottom: 1px solid #f1f5f9;
-            text-decoration: none;
-            color: var(--text-main);
-            transition: background 0.15s ease;
+            width: 100%;
         }
-        .search-result-item:hover {
-            background: var(--primary-light);
+        .pub-search-form input {
+            width: 100%;
+            height: 42px;
+            background: #f1f5f9;
+            border: 1.5px solid #e2e8f0;
+            border-radius: 50px;
+            padding: 0 46px 0 18px;
+            font-size: 13.5px;
+            font-weight: 500;
+            color: #1e293b;
+            outline: none;
+            transition: all 0.25s ease;
+        }
+        .pub-search-form input:focus {
+            background: #ffffff;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 4px var(--primary-glow);
+        }
+        .pub-search-form input::placeholder {
+            color: #94a3b8;
+        }
+        .pub-search-submit {
+            position: absolute;
+            right: 4px;
+            width: 34px;
+            height: 34px;
+            background: var(--primary);
+            color: #ffffff;
+            border: none;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s ease;
+        }
+        .pub-search-submit:hover {
+            background: var(--primary-hover);
+            transform: scale(1.06);
+        }
+
+        /* User & CTA Area */
+        .pub-nav-cta {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-shrink: 0;
+        }
+        .btn-nav-login {
+            padding: 8px 18px;
+            border: 1.5px solid var(--primary);
             color: var(--primary);
-        }
-        .search-result-title {
+            border-radius: 50px;
             font-size: 13.5px;
             font-weight: 600;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 220px;
+            text-decoration: none;
+            transition: all 0.2s ease;
+            background: transparent;
         }
-        .search-result-price {
+        .btn-nav-login:hover {
+            background: var(--primary-light);
+            color: var(--primary-hover);
+        }
+        .btn-nav-register {
+            padding: 8px 20px;
+            background: var(--primary);
+            color: #ffffff !important;
+            border-radius: 50px;
+            font-size: 13.5px;
+            font-weight: 700;
+            text-decoration: none;
+            border: none;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 12px rgba(4, 120, 87, 0.25);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-nav-register:hover {
+            background: var(--primary-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 16px rgba(4, 120, 87, 0.35);
+        }
+
+        .btn-nav-wallet {
+            padding: 7px 14px;
+            border-radius: 50px;
             font-size: 13px;
             font-weight: 700;
+            background: #ecfdf5;
+            color: var(--primary);
+            border: 1px solid #a7f3d0;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            transition: all 0.2s ease;
+        }
+        .btn-nav-wallet:hover {
+            background: #d1fae5;
+            transform: translateY(-1px);
+        }
+
+        .pub-user-badge {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 5px 14px 5px 6px;
+            border-radius: 50px;
+            background: #f1f5f9;
+            text-decoration: none;
+            color: #1e293b;
+            font-weight: 600;
+            font-size: 13.5px;
+            transition: all 0.2s ease;
+        }
+        .pub-user-badge:hover {
+            background: #e2e8f0;
+        }
+        .pub-avatar-circle {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background: var(--primary);
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 800;
+        }
+        .btn-nav-logout {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1.5px solid #fee2e2;
+            background: #fef2f2;
+            color: #ef4444;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+        .btn-nav-logout:hover {
+            background: #ef4444;
+            color: #ffffff;
+            border-color: #ef4444;
+        }
+
+        /* Mobile Hamburger Toggle */
+        .mobile-toggle-btn {
+            display: none;
+            background: none;
+            border: none;
+            color: #1e293b;
+            font-size: 20px;
+            padding: 8px;
+            cursor: pointer;
+        }
+
+        /* Mobile Drawer */
+        .mobile-drawer {
+            display: none;
+            background: #ffffff;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 16px 24px;
+        }
+        .mobile-drawer.open {
+            display: block;
+        }
+        .mobile-nav-links {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .mobile-nav-links a {
+            padding: 10px 14px;
+            border-radius: 8px;
+            color: #1e293b;
+            font-weight: 600;
+            text-decoration: none;
+        }
+        .mobile-nav-links a:hover {
+            background: #f1f5f9;
             color: var(--primary);
         }
 
-        /* ── Hero Showcase Section ── */
+        /* ── Hero Section ── */
         .hero {
-            background: linear-gradient(135deg, #091e17 0%, #064e3b 50%, #022c22 100%);
-            color: #ffffff;
-            padding: 64px 0 80px 0;
             position: relative;
+            background: linear-gradient(135deg, #091e17 0%, #0f2d24 50%, #061913 100%);
+            padding: 72px 0 84px;
+            color: #ffffff;
             overflow: hidden;
         }
         .hero::before {
             content: '';
             position: absolute;
             top: -20%;
-            right: -10%;
-            width: 600px;
-            height: 600px;
-            border-radius: 50%;
-            background: radial-gradient(circle, rgba(16, 185, 129, 0.15) 0%, transparent 70%);
+            left: 10%;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(16, 185, 129, 0.18) 0%, rgba(4, 120, 87, 0) 70%);
+            filter: blur(60px);
             pointer-events: none;
         }
+        .hero::after {
+            content: '';
+            position: absolute;
+            bottom: -20%;
+            right: 5%;
+            width: 450px;
+            height: 450px;
+            background: radial-gradient(circle, rgba(245, 158, 11, 0.12) 0%, rgba(245, 158, 11, 0) 70%);
+            filter: blur(60px);
+            pointer-events: none;
+        }
+
         .hero-inner {
             max-width: 1320px;
             margin: 0 auto;
-            padding: 0 20px;
+            padding: 0 24px;
             display: grid;
             grid-template-columns: 1.15fr 0.85fr;
             gap: 48px;
             align-items: center;
+            position: relative;
+            z-index: 2;
         }
+
+        .hero-text {
+            max-width: 650px;
+        }
+
         .hero-eyebrow {
             display: inline-flex;
             align-items: center;
-            gap: 8px;
+            gap: 9px;
             background: rgba(16, 185, 129, 0.15);
-            border: 1px solid rgba(16, 185, 129, 0.3);
-            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.35);
+            padding: 6px 16px;
+            border-radius: 50px;
             font-size: 13px;
             font-weight: 700;
-            padding: 6px 14px;
-            border-radius: 9999px;
-            margin-bottom: 20px;
+            color: #34d399;
+            margin-bottom: 24px;
+            letter-spacing: 0.3px;
         }
-        .live-dot {
+        .pulse-dot {
             width: 8px;
             height: 8px;
-            background: #34d399;
             border-radius: 50%;
-            animation: pulse-dot 1.8s infinite;
+            background: #10b981;
+            box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+            animation: pulse-ring 1.8s infinite;
         }
-        @keyframes pulse-dot {
-            0% { transform: scale(0.9); opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.7); }
-            70% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 7px rgba(52, 211, 153, 0); }
-            100% { transform: scale(0.9); opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
-        }
-        .hero-title {
-            font-size: 3.25rem;
-            font-weight: 800;
-            line-height: 1.15;
-            letter-spacing: -0.02em;
-            margin-bottom: 20px;
-        }
-        .hero-sub {
-            font-size: 1.125rem;
-            line-height: 1.6;
-            color: #cbd5e1;
-            margin-bottom: 32px;
-            max-width: 580px;
-        }
-        .hero-actions {
-            display: flex;
-            gap: 16px;
-            flex-wrap: wrap;
-            margin-bottom: 40px;
-        }
-        .btn-gold {
-            background-color: var(--gold) !important;
-            border-color: var(--gold) !important;
-            color: #0f172a !important;
-            font-weight: 700;
-            transition: all 0.25s ease;
-        }
-        .btn-gold:hover {
-            background-color: var(--gold-hover) !important;
-            border-color: var(--gold-hover) !important;
-            color: #ffffff !important;
-            transform: translateY(-2px);
-            box-shadow: 0 6px 18px rgba(245, 158, 11, 0.35);
-        }
-        .hero-stats {
-            display: flex;
-            gap: 36px;
-            padding-top: 24px;
-            border-top: 1px solid rgba(255, 255, 255, 0.12);
-        }
-        .hero-stat-val {
-            font-size: 1.75rem;
-            font-weight: 800;
-            color: #34d399;
-            line-height: 1.2;
-        }
-        .hero-stat-label {
-            font-size: 0.85rem;
-            color: #94a3b8;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
         }
 
-        /* ── Hero Interactive Cards ── */
+        .hero-title {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            font-size: 54px;
+            line-height: 1.12;
+            font-weight: 900;
+            color: #ffffff;
+            margin-bottom: 20px;
+            letter-spacing: -1.2px;
+        }
+        .hero-title .gradient-accent {
+            background: linear-gradient(135deg, #34d399 0%, #10b981 40%, #fbbf24 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-sub {
+            font-size: 16.5px;
+            line-height: 1.65;
+            color: rgba(255, 255, 255, 0.82);
+            margin-bottom: 34px;
+            font-weight: 400;
+        }
+
+        .hero-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 42px;
+        }
+
+        .btn-hero-primary {
+            background: #047857;
+            color: #ffffff !important;
+            padding: 14px 28px;
+            border-radius: 12px;
+            font-size: 15.5px;
+            font-weight: 700;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            box-shadow: 0 8px 24px rgba(4, 120, 87, 0.45);
+            transition: all 0.25s ease;
+        }
+        .btn-hero-primary:hover {
+            background: #059669;
+            transform: translateY(-2px);
+            box-shadow: 0 12px 30px rgba(4, 120, 87, 0.6);
+        }
+
+        .btn-hero-secondary {
+            background: rgba(255, 255, 255, 0.08);
+            color: #ffffff !important;
+            padding: 14px 26px;
+            border-radius: 12px;
+            font-size: 15.5px;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            backdrop-filter: blur(8px);
+            transition: all 0.25s ease;
+        }
+        .btn-hero-secondary:hover {
+            background: rgba(255, 255, 255, 0.16);
+            border-color: rgba(255, 255, 255, 0.4);
+            transform: translateY(-2px);
+        }
+
+        .hero-stats-row {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.12);
+            padding-top: 26px;
+        }
+        .hero-stat-box {
+            display: flex;
+            flex-direction: column;
+        }
+        .hero-stat-number {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            font-size: 28px;
+            font-weight: 800;
+            color: #34d399;
+            line-height: 1;
+            margin-bottom: 6px;
+        }
+        .hero-stat-desc {
+            font-size: 12.5px;
+            color: rgba(255, 255, 255, 0.65);
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        /* Hero Right Preview Visual */
         .hero-visual {
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 14px;
         }
         .hero-card {
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            backdrop-filter: blur(10px);
-            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.07);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            backdrop-filter: blur(16px);
+            border-radius: 16px;
             padding: 14px 18px;
             display: flex;
             align-items: center;
             gap: 16px;
-            transition: all 0.25s ease;
             text-decoration: none;
-            color: #fff;
+            color: #ffffff;
+            transition: all 0.25s ease;
         }
         .hero-card:hover {
-            background: rgba(255, 255, 255, 0.14);
-            border-color: #34d399;
-            transform: translateX(4px);
-            color: #fff;
+            background: rgba(255, 255, 255, 0.13);
+            border-color: rgba(52, 211, 153, 0.4);
+            transform: translateX(6px);
         }
         .hero-card.featured {
-            border-color: rgba(52, 211, 153, 0.5);
-            background: rgba(16, 185, 129, 0.12);
+            background: linear-gradient(135deg, rgba(4, 120, 87, 0.35) 0%, rgba(15, 23, 42, 0.4) 100%);
+            border: 1.5px solid rgba(52, 211, 153, 0.45);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
         }
-        .hero-card-img {
-            width: 80px;
-            height: 80px;
+        .hero-card-thumb {
+            width: 82px;
+            height: 72px;
             border-radius: 10px;
             overflow: hidden;
-            flex-shrink: 0;
             background: rgba(0, 0, 0, 0.3);
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
-        .hero-card-img img {
+        .hero-card-thumb img {
             width: 100%;
             height: 100%;
             object-fit: cover;
         }
+        .hero-card-info {
+            flex: 1;
+            min-width: 0;
+        }
         .hero-card-title {
-            font-size: 15px;
+            font-size: 14.5px;
             font-weight: 700;
             color: #ffffff;
             margin-bottom: 4px;
-            display: -webkit-box;
-            -webkit-line-clamp: 1;
-            -webkit-box-orient: vertical;
+            white-space: nowrap;
             overflow: hidden;
+            text-overflow: ellipsis;
         }
-        .hero-card-price {
-            font-size: 14px;
+        .hero-card-price-tag {
+            font-size: 13.5px;
             font-weight: 700;
             color: #34d399;
             margin-bottom: 3px;
         }
-        .hero-card-timer {
+        .hero-card-meta {
             font-size: 12px;
-            color: #cbd5e1;
+            color: rgba(255, 255, 255, 0.65);
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 10px;
+        }
+        .hero-card-meta span {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
 
-        /* ── Sections & Catalog Grid ── */
-        .section {
-            padding: 72px 0;
+        /* ── Sections Common Styling ── */
+        .section-wrap {
+            padding: 80px 0;
         }
         .section-alt {
-            background: #ffffff;
-            border-top: 1px solid var(--card-border);
-            border-bottom: 1px solid var(--card-border);
+            background-color: #f1f5f9;
         }
-        .section-inner {
+        .container {
             max-width: 1320px;
             margin: 0 auto;
-            padding: 0 20px;
+            padding: 0 24px;
         }
-        .section-header {
+        .section-header-row {
             display: flex;
-            justify-content: space-between;
             align-items: flex-end;
+            justify-content: space-between;
             margin-bottom: 36px;
+            flex-wrap: wrap;
+            gap: 16px;
         }
-        .section-title {
-            font-size: 2.25rem;
+        .section-badge {
+            display: inline-block;
+            font-size: 12px;
             font-weight: 800;
-            color: var(--text-main);
-            letter-spacing: -0.02em;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--primary);
+            background: var(--primary-light);
+            padding: 4px 12px;
+            border-radius: 50px;
+            margin-bottom: 8px;
+        }
+        .section-heading {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            font-size: 32px;
+            font-weight: 800;
+            color: var(--text-heading);
+            letter-spacing: -0.6px;
+            line-height: 1.2;
             margin-bottom: 6px;
         }
-        .section-sub {
-            font-size: 1rem;
-            color: var(--text-muted);
-            margin: 0;
-        }
-        .section-link {
+        .section-subheading {
             font-size: 15px;
+            color: #64748b;
+        }
+        .section-action-link {
+            font-size: 14px;
             font-weight: 700;
             color: var(--primary);
             text-decoration: none;
-            transition: transform 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
         }
-        .section-link:hover {
-            color: var(--primary-dark);
+        .section-action-link:hover {
+            color: var(--primary-hover);
             transform: translateX(3px);
         }
 
-        /* ── Category Cards Grid ── */
-        .grid-categories {
+        /* ── Categories Grid ── */
+        .categories-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
             gap: 20px;
         }
-        .cat-card {
+        .cat-box {
             background: #ffffff;
-            border: 1px solid var(--card-border);
-            border-radius: 14px;
-            padding: 24px 20px;
-            text-align: center;
-            text-decoration: none;
-            color: var(--text-main);
-            transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+            border: 1px solid #e2e8f0;
+            border-radius: var(--radius-lg);
+            padding: 22px 20px;
             display: flex;
-            flex-direction: column;
             align-items: center;
+            gap: 16px;
+            text-decoration: none;
+            color: #1e293b;
+            box-shadow: var(--shadow-subtle);
+            transition: all 0.25s ease;
         }
-        .cat-card:hover {
+        .cat-box:hover {
             border-color: var(--primary);
-            box-shadow: 0 12px 28px rgba(4, 120, 87, 0.08);
-            transform: translateY(-4px);
-            color: var(--primary);
+            box-shadow: 0 10px 25px rgba(4, 120, 87, 0.12);
+            transform: translateY(-3px);
         }
-        .cat-card-icon {
-            width: 56px;
-            height: 56px;
+        .cat-icon-wrap {
+            width: 52px;
+            height: 52px;
             border-radius: 14px;
             background: var(--primary-light);
             color: var(--primary);
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 24px;
-            margin-bottom: 16px;
-            transition: transform 0.25s ease;
+            font-size: 22px;
+            flex-shrink: 0;
+            transition: all 0.25s ease;
         }
-        .cat-card:hover .cat-card-icon {
-            transform: scale(1.1);
+        .cat-box:hover .cat-icon-wrap {
             background: var(--primary);
             color: #ffffff;
+            transform: scale(1.08);
         }
-        .cat-card-name {
-            font-size: 16px;
+        .cat-info-name {
+            font-size: 15.5px;
             font-weight: 700;
-            margin-bottom: 4px;
+            color: #0f172a;
+            margin-bottom: 3px;
         }
-        .cat-card-count {
-            font-size: 13px;
-            color: var(--text-muted);
+        .cat-info-count {
+            font-size: 12.5px;
+            color: #64748b;
+            font-weight: 500;
         }
 
-        /* ── How It Works Steps ── */
-        .steps {
+        /* ── How It Works Grid ── */
+        .how-steps-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 30px;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 28px;
+            margin-top: 20px;
         }
-        .step-item {
+        .step-card {
             background: #ffffff;
-            border: 1px solid var(--card-border);
-            border-radius: 16px;
-            padding: 32px 24px;
+            border: 1px solid #e2e8f0;
+            border-radius: var(--radius-xl);
+            padding: 36px 28px;
             text-align: center;
+            box-shadow: var(--shadow-subtle);
+            transition: all 0.25s ease;
             position: relative;
-            transition: transform 0.25s ease;
         }
-        .step-item:hover {
+        .step-card:hover {
+            box-shadow: var(--shadow-card);
             transform: translateY(-4px);
-            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.05);
+            border-color: #cbd5e1;
         }
-        .step-num {
-            width: 48px;
-            height: 48px;
+        .step-badge-num {
+            width: 60px;
+            height: 60px;
             border-radius: 50%;
-            background: var(--primary);
+            background: linear-gradient(135deg, #047857 0%, #10b981 100%);
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            font-size: 24px;
+            font-weight: 800;
+            margin: 0 auto 22px;
+            box-shadow: 0 8px 20px rgba(4, 120, 87, 0.3);
+        }
+        .step-title {
+            font-size: 18px;
+            font-weight: 800;
+            color: #0f172a;
+            margin-bottom: 12px;
+        }
+        .step-desc {
+            font-size: 14.5px;
+            line-height: 1.6;
+            color: #64748b;
+        }
+
+        /* ── Top Sellers Grid ── */
+        .sellers-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 24px;
+        }
+        .seller-badge-card {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: var(--radius-lg);
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            box-shadow: var(--shadow-subtle);
+            transition: all 0.25s ease;
+        }
+        .seller-badge-card:hover {
+            box-shadow: var(--shadow-card);
+            border-color: var(--primary);
+            transform: translateY(-2px);
+        }
+        .seller-avatar-large {
+            width: 58px;
+            height: 58px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #047857 0%, #059669 100%);
             color: #ffffff;
             display: flex;
             align-items: center;
             justify-content: center;
             font-size: 20px;
             font-weight: 800;
-            margin: 0 auto 20px auto;
-            box-shadow: 0 4px 12px var(--primary-ring);
+            flex-shrink: 0;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(4, 120, 87, 0.2);
         }
-        .step-title {
-            font-size: 18px;
+        .seller-avatar-large img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .seller-info-title {
+            font-size: 16px;
             font-weight: 700;
-            color: var(--text-main);
-            margin-bottom: 10px;
+            color: #0f172a;
+            margin-bottom: 2px;
         }
-        .step-desc {
-            font-size: 14px;
-            color: var(--text-muted);
-            line-height: 1.6;
+        .seller-rank-tag {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--primary);
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-bottom: 4px;
+        }
+        .seller-items-count {
+            font-size: 12.5px;
+            color: #64748b;
         }
 
-        /* ── Top Seller Card ── */
-        .seller-showcase-box {
-            background: #ffffff;
-            border: 1px solid var(--card-border);
-            border-radius: 16px;
-            padding: 24px;
-            max-width: 450px;
-            display: flex;
-            align-items: center;
-            gap: 20px;
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.04);
-        }
-        .seller-avatar-large {
-            width: 68px;
-            height: 68px;
-            border-radius: 50%;
-            background: var(--primary);
+        /* ── High-Impact CTA Banner ── */
+        .cta-banner {
+            background: linear-gradient(135deg, #091e17 0%, #047857 60%, #065f46 100%);
+            padding: 70px 0;
             color: #ffffff;
+            position: relative;
+            overflow: hidden;
+        }
+        .cta-banner::before {
+            content: '';
+            position: absolute;
+            top: 0; right: 0; bottom: 0; left: 0;
+            background: radial-gradient(circle at 80% 20%, rgba(245, 158, 11, 0.2) 0%, transparent 60%);
+            pointer-events: none;
+        }
+        .cta-banner-inner {
+            position: relative;
+            z-index: 2;
+            text-align: center;
+            max-width: 720px;
+            margin: 0 auto;
+        }
+        .cta-banner-title {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            font-size: 38px;
+            font-weight: 900;
+            margin-bottom: 14px;
+            letter-spacing: -0.8px;
+            color: #ffffff;
+        }
+        .cta-banner-sub {
+            font-size: 16.5px;
+            color: rgba(255, 255, 255, 0.85);
+            margin-bottom: 32px;
+            line-height: 1.6;
+        }
+        .cta-banner-actions {
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 24px;
-            font-weight: 800;
-            flex-shrink: 0;
-        }
-        .seller-name-large {
-            font-size: 18px;
-            font-weight: 700;
-            color: var(--text-main);
-            margin-bottom: 4px;
-        }
-        .seller-meta-tag {
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            font-size: 12px;
-            font-weight: 700;
-            color: var(--primary);
-            background: var(--primary-light);
-            padding: 3px 10px;
-            border-radius: 9999px;
-            margin-bottom: 6px;
+            gap: 16px;
+            flex-wrap: wrap;
         }
 
-        /* ── Footer ── */
+        /* ── Professional Footer ── */
         .site-footer {
             background: #0f172a;
-            color: #cbd5e1;
-            padding: 64px 0 32px 0;
+            color: #94a3b8;
+            padding: 68px 0 32px;
             border-top: 1px solid #1e293b;
         }
-        .footer-inner {
-            max-width: 1320px;
-            margin: 0 auto;
-            padding: 0 20px;
-        }
-        .footer-grid {
+        .footer-grid-layout {
             display: grid;
             grid-template-columns: 2fr 1fr 1fr 1fr;
-            gap: 40px;
+            gap: 48px;
             margin-bottom: 48px;
         }
-        .footer-brand-logo img {
-            height: 42px;
+        .footer-brand-box img {
+            height: 44px;
             width: auto;
+            object-fit: contain;
             margin-bottom: 16px;
         }
-        .footer-brand-text {
-            font-size: 14px;
-            line-height: 1.6;
+        .footer-brand-desc {
+            font-size: 13.5px;
+            line-height: 1.7;
             color: #94a3b8;
             max-width: 320px;
+            margin-bottom: 20px;
         }
-        .footer-col-title {
-            font-size: 15px;
+        .footer-social-links {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .footer-social-links a {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: #1e293b;
+            color: #cbd5e1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+        .footer-social-links a:hover {
+            background: var(--primary);
+            color: #ffffff;
+            transform: translateY(-2px);
+        }
+        .footer-title {
+            font-size: 14px;
             font-weight: 700;
             color: #ffffff;
-            margin-bottom: 18px;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.8px;
+            margin-bottom: 20px;
         }
-        .footer-links {
+        .footer-menu {
+            list-style: none;
+            padding: 0;
+            margin: 0;
             display: flex;
             flex-direction: column;
             gap: 12px;
         }
-        .footer-links a {
+        .footer-menu a {
+            font-size: 13.5px;
             color: #94a3b8;
-            font-size: 14px;
             text-decoration: none;
-            transition: color 0.2s ease, transform 0.2s ease;
+            transition: all 0.2s ease;
         }
-        .footer-links a:hover {
-            color: #34d399;
+        .footer-menu a:hover {
+            color: #ffffff;
             transform: translateX(3px);
         }
-        .footer-bottom {
-            padding-top: 32px;
+        .footer-divider {
             border-top: 1px solid #1e293b;
+            padding-top: 24px;
             display: flex;
-            justify-content: space-between;
             align-items: center;
+            justify-content: space-between;
             font-size: 13px;
             color: #64748b;
             flex-wrap: wrap;
-            gap: 16px;
+            gap: 12px;
         }
 
-        /* Responsive Breakpoints */
-        @media (max-width: 991px) {
+        /* ── Responsive Queries ── */
+        @media (max-width: 1024px) {
             .hero-inner {
                 grid-template-columns: 1fr;
                 gap: 40px;
             }
             .hero-title {
-                font-size: 2.5rem;
+                font-size: 42px;
             }
-            .footer-grid {
-                grid-template-columns: 1fr 1fr;
-            }
-            .pub-nav-links {
-                display: none;
-            }
-            .pub-search-box {
-                max-width: 220px;
-            }
-        }
-        @media (max-width: 575px) {
-            .hero-title {
-                font-size: 2rem;
-            }
-            .hero-stats {
-                flex-direction: column;
-                gap: 16px;
-            }
-            .footer-grid {
+            .how-steps-grid {
                 grid-template-columns: 1fr;
             }
-            .pub-search-box {
+            .footer-grid-layout {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+        @media (max-width: 768px) {
+            .pub-nav-links, .pub-search-wrapper {
                 display: none;
+            }
+            .mobile-toggle-btn {
+                display: block;
+            }
+            .hero-title {
+                font-size: 34px;
+            }
+            .hero-stats-row {
+                grid-template-columns: 1fr;
+                gap: 14px;
+            }
+            .footer-grid-layout {
+                grid-template-columns: 1fr;
             }
         }
     </style>
 </head>
 <body>
+<?php include_once __DIR__ . '/includes/components/loading_spinner_overlay.php'; ?>
 
-<?php 
-// Loading Spinner Overlay Component
-include_once __DIR__ . '/includes/components/loading_spinner_overlay.php'; 
-?>
-
-<!-- ── Main Navigation Bar ── -->
+<!-- ── Navigation Bar ── -->
 <nav class="pub-nav">
     <div class="pub-nav-inner">
         <!-- Logo -->
-        <a href="index.php" class="pub-logo" title="Geo Auction">
-            <img src="assets/image/Geo-auction.png" alt="Geo Auction Logo" onerror="this.onerror=null;this.src='assets/image/geo-auction.png'">
+        <a href="index.php" class="pub-logo" aria-label="Geo Auction Home">
+            <img src="assets/image/Geo-auction-logo-clean.png" alt="Geo Auction" onerror="this.onerror=null;this.src='assets/image/Geo-auction.png'">
         </a>
 
-        <!-- Desktop Links -->
+        <!-- Desktop Navigation Links -->
         <div class="pub-nav-links">
-            <a href="index.php" class="active"><i class="fas fa-home me-1"></i> Home</a>
-            <a href="#live_auction"><i class="fas fa-gavel me-1"></i> Live Auctions</a>
-            <a href="#category"><i class="fas fa-th-large me-1"></i> Categories</a>
-            <a href="#about"><i class="fas fa-info-circle me-1"></i> How It Works</a>
+            <a href="#home" class="active"><i class="fas fa-home"></i> Home</a>
+            <a href="items.php"><i class="fas fa-gavel"></i> Live Auctions</a>
+            <a href="#category"><i class="fas fa-th-large"></i> Categories</a>
+            <a href="#about"><i class="fas fa-info-circle"></i> How It Works</a>
+            <a href="contact.php"><i class="fas fa-envelope"></i> Contact</a>
         </div>
 
-        <!-- Live Search Bar with AJAX Autocomplete -->
-        <div class="pub-search-box">
-            <form action="search.php" method="GET" id="navSearchForm">
-                <i class="fas fa-search pub-search-icon"></i>
-                <input type="text" name="q" id="navSearchInput" placeholder="Search auctions, brands..." autocomplete="off">
+        <!-- Global Search Bar -->
+        <div class="pub-search-wrapper">
+            <form action="search.php" method="GET" class="pub-search-form">
+                <input type="text" name="q" placeholder="Search live auctions, items..." required autocomplete="off">
+                <button type="submit" class="pub-search-submit" title="Search Auctions" aria-label="Search">
+                    <i class="fas fa-search"></i>
+                </button>
             </form>
-            <div id="navSearchResults" class="search-results-dropdown"></div>
         </div>
 
-        <!-- CTA & User Session Controls -->
-        <div class="d-flex align-items-center gap-2">
+        <!-- User / Auth CTA -->
+        <div class="pub-nav-cta">
             <?php if ($is_logged): ?>
-                <a href="user/wallet.php" class="btn btn-outline-emerald btn-sm d-flex align-items-center gap-2 py-1 px-3" title="My Wallet">
-                    <i class="fas fa-wallet text-emerald"></i>
-                    <span>Rs. <?php echo number_format($user_balance, 2); ?></span>
+                <a href="user/dashboard.php" class="btn-nav-wallet" title="User Dashboard">
+                    <i class="fas fa-th-large"></i>
+                    <span>Dashboard</span>
                 </a>
-                <a href="dashboard.php" class="btn btn-emerald btn-sm d-flex align-items-center gap-2 py-1 px-3" title="Go to Dashboard">
-                    <span class="badge bg-light text-dark rounded-circle px-2 py-1"><?php echo $user_init; ?></span>
-                    <span class="d-none d-sm-inline"><?php echo htmlspecialchars($user_name); ?></span>
+                <a href="user/dashboard.php" class="pub-user-badge" title="Go to Dashboard">
+                    <div class="pub-avatar-circle"><?php echo $user_init; ?></div>
+                    <span><?php echo htmlspecialchars($user_name); ?></span>
                 </a>
-                <a href="logout.php" class="btn btn-outline-danger btn-sm logout-btn py-1 px-2" title="Sign Out">
+                <a href="logout.php" class="btn-nav-logout logout-btn" title="Logout">
                     <i class="fas fa-sign-out-alt"></i>
                 </a>
             <?php else: ?>
-                <a href="login.php" class="btn btn-outline-emerald btn-sm px-3 py-1">
-                    <i class="fas fa-sign-in-alt me-1"></i> Login
-                </a>
-                <a href="register.php" class="btn btn-emerald btn-sm px-3 py-1">
-                    <i class="fas fa-user-plus me-1"></i> Register Free
+                <a href="login.php" class="btn-nav-login">Login</a>
+                <a href="register.php" class="btn-nav-register">
+                    <i class="fas fa-user-plus"></i> Register Free
                 </a>
             <?php endif; ?>
+
+            <!-- Mobile Hamburger Button -->
+            <button class="mobile-toggle-btn" id="mobileMenuToggle" aria-label="Toggle mobile menu">
+                <i class="fas fa-bars"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Mobile Slide Drawer -->
+    <div class="mobile-drawer" id="mobileDrawer">
+        <form action="search.php" method="GET" class="pub-search-form" style="margin-bottom: 16px;">
+            <input type="text" name="q" placeholder="Search live auctions..." required autocomplete="off">
+            <button type="submit" class="pub-search-submit" aria-label="Search"><i class="fas fa-search"></i></button>
+        </form>
+        <div class="mobile-nav-links">
+            <a href="#home">Home</a>
+            <a href="items.php">Live Auctions</a>
+            <a href="#category">Categories</a>
+            <a href="#about">How It Works</a>
+            <a href="contact.php">Contact</a>
         </div>
     </div>
 </nav>
 
-<!-- ── Hero Showcase Section ── -->
+<!-- ── Hero Section ── -->
 <section class="hero" id="home">
     <div class="hero-inner">
-        <!-- Hero Text & Metrics -->
         <div class="hero-text">
             <div class="hero-eyebrow">
-                <span class="live-dot"></span>
-                <span><?php echo number_format($live_count > 0 ? $live_count : 12); ?> Auctions Active Now</span>
+                <span class="pulse-dot"></span>
+                <span><?php echo number_format($live_count); ?>+ Live Auctions Online Now</span>
             </div>
             <h1 class="hero-title">
-                Bid Smart,<br>Win <span style="color: #34d399;">Big</span> in Real-Time.
+                Bid Smart, <br><span class="gradient-accent">Win Big.</span>
             </h1>
             <p class="hero-sub">
-                Discover verified live auctions across cars, electronics, jewelry, collectibles, and luxury assets. Place competitive bids, experience transparent anti-sniping timers, and settle securely.
+                Explore real-time auctions across Pakistan and worldwide. Place live bids with instant updates, certified escrow transactions, and verified authentic sellers.
             </p>
             <div class="hero-actions">
-                <a href="items.php" class="btn btn-gold btn-lg px-4 py-3 d-inline-flex align-items-center gap-2">
-                    <i class="fas fa-gavel"></i> Browse All Auctions
+                <a href="items.php" class="btn-hero-primary">
+                    <i class="fas fa-gavel"></i> Explore Live Auctions
                 </a>
                 <?php if (!$is_logged): ?>
-                    <a href="register.php" class="btn btn-outline-light btn-lg px-4 py-3 d-inline-flex align-items-center gap-2">
-                        <i class="fas fa-bolt"></i> Start Bidding Free
+                    <a href="register.php" class="btn-hero-secondary">
+                        <i class="fas fa-user-check"></i> Register Free
                     </a>
                 <?php else: ?>
-                    <a href="user/add_items.php" class="btn btn-outline-light btn-lg px-4 py-3 d-inline-flex align-items-center gap-2">
-                        <i class="fas fa-plus-circle"></i> List an Item
+                    <a href="user/add_items.php" class="btn-hero-secondary">
+                        <i class="fas fa-plus-circle"></i> Create Auction
                     </a>
                 <?php endif; ?>
             </div>
-
-            <!-- Real-Time Metrics Counters -->
-            <div class="hero-stats">
-                <div class="hero-stat">
-                    <div class="hero-stat-val"><?php echo number_format($live_count > 0 ? $live_count : 24); ?>+</div>
-                    <div class="hero-stat-label">Live Auctions</div>
+            <div class="hero-stats-row">
+                <div class="hero-stat-box">
+                    <div class="hero-stat-number"><?php echo number_format($live_count); ?>+</div>
+                    <div class="hero-stat-desc">Live Auctions</div>
                 </div>
-                <div class="hero-stat">
-                    <div class="hero-stat-val"><?php echo number_format($bid_count > 0 ? $bid_count : 1480); ?>+</div>
-                    <div class="hero-stat-label">Verified Bids</div>
+                <div class="hero-stat-box">
+                    <div class="hero-stat-number"><?php echo number_format($bid_count); ?>+</div>
+                    <div class="hero-stat-desc">Bids Placed</div>
                 </div>
-                <div class="hero-stat">
-                    <div class="hero-stat-val"><?php echo number_format($user_count > 0 ? $user_count : 520); ?>+</div>
-                    <div class="hero-stat-label">Bidders & Sellers</div>
+                <div class="hero-stat-box">
+                    <div class="hero-stat-number"><?php echo number_format($user_count); ?>+</div>
+                    <div class="hero-stat-desc">Active Members</div>
                 </div>
             </div>
         </div>
 
-        <!-- Hero Dynamic Cards Showcase -->
+        <!-- Hero Dynamic Preview Cards -->
         <div class="hero-visual">
-            <?php foreach ($hero_items as $idx => $hi): 
-                $current_price = !empty($hi['max_bid']) ? $hi['max_bid'] : (!empty($hi['current_price']) ? $hi['current_price'] : ($hi['starting_price'] ?? 0));
-                $price_str = number_format((float)$current_price, 2);
-                $end_ts = !empty($hi['end_time']) ? strtotime($hi['end_time']) : (time() + 3600);
-                $diff = max(0, $end_ts - time());
+            <?php
+            $hero_items = array_slice($featured_items, 0, 3);
+            foreach ($hero_items as $idx => $hi):
+                $current_price = $hi['max_bid'] ? $hi['max_bid'] : $hi['starting_price'];
+                $price = number_format((float)$current_price, 2);
+                $diff  = $hi['end_time'] ? strtotime($hi['end_time']) - time() : 0;
+                if ($diff < 3600 && $diff > 0) $timer_str = round($diff/60).'m left';
+                elseif ($diff < 86400 && $diff > 0) $timer_str = round($diff/3600).'h left';
+                elseif ($diff > 0) {
+                    $days = floor($diff / 86400);
+                    $hours = floor(($diff % 86400) / 3600);
+                    $timer_str = $days . 'd ' . $hours . 'h left';
+                }
+                else $timer_str = 'Ending soon';
+                $is_featured = ($idx === 0);
+                $item_link = $is_logged ? "item.php?id={$hi['id']}" : "login.php?redirect=" . urlencode("item.php?id={$hi['id']}");
                 
-                $img_src = !empty($hi['featured_image']) ? $hi['featured_image'] : '';
-                if (empty($img_src) && !empty($hi['images'])) {
-                    $decoded = json_decode($hi['images'], true);
-                    $img_src = is_array($decoded) && !empty($decoded[0]) ? $decoded[0] : '';
+                $hi_raw_images = $hi['images'] ?? '';
+                $hi_img_list = [];
+                if (!empty($hi_raw_images)) {
+                    $hi_decoded = json_decode($hi_raw_images, true);
+                    if (is_array($hi_decoded)) {
+                        $hi_img_list = $hi_decoded;
+                    } else {
+                        $hi_img_list = array_map('trim', explode(',', $hi_raw_images));
+                    }
                 }
-                if (empty($img_src)) {
-                    $img_src = 'assets/image/Geo-auction.png';
-                }
-                $is_first = ($idx === 0);
+                $img_src = !empty($hi_img_list[0]) ? $hi_img_list[0] : (!empty($hi['featured_image']) ? $hi['featured_image'] : '');
             ?>
-                <a href="live_auction.php?id=<?php echo (int)$hi['id']; ?>" class="hero-card <?php echo $is_first ? 'featured' : ''; ?>">
-                    <div class="hero-card-img">
-                        <img src="<?php echo htmlspecialchars($img_src); ?>" alt="<?php echo htmlspecialchars($hi['title']); ?>" onerror="this.onerror=null;this.src='assets/image/Geo-auction.png'">
+                <a href="<?php echo $item_link; ?>" class="hero-card<?php echo $is_featured ? ' featured' : ''; ?>">
+                    <div class="hero-card-thumb">
+                        <?php if ($img_src): ?>
+                            <img src="<?php echo htmlspecialchars($img_src); ?>" alt="<?php echo htmlspecialchars($hi['title']); ?>" onerror="this.onerror=null;this.src='assets/image/Geo-auction.png';">
+                        <?php else: ?>
+                            <i class="fas fa-tag" style="font-size:22px;color:#34d399;"></i>
+                        <?php endif; ?>
                     </div>
-                    <div class="flex-grow-1">
-                        <div class="d-flex justify-content-between align-items-center mb-1">
-                            <span class="badge <?php echo $is_first ? 'bg-success' : 'bg-secondary'; ?> text-white" style="font-size:10px;">
-                                <i class="fas fa-circle live-dot" style="font-size:6px; margin-right:3px;"></i> LIVE
-                            </span>
-                            <small class="text-white-50" style="font-size:11px;">
-                                <i class="fas fa-user-tie me-1"></i> <?php echo htmlspecialchars($hi['seller_name'] ?? 'Verified'); ?>
-                            </small>
-                        </div>
+                    <div class="hero-card-info">
                         <div class="hero-card-title"><?php echo htmlspecialchars($hi['title']); ?></div>
-                        <div class="hero-card-price">Current Bid: Rs. <?php echo $price_str; ?></div>
-                        <div class="hero-card-timer">
-                            <i class="fas fa-clock text-emerald"></i>
-                            <span class="stat-timer-val" data-end-timestamp="<?php echo $end_ts; ?>">Ending soon</span>
-                            <span>•</span>
-                            <span><?php echo (int)($hi['bid_count'] ?? 0); ?> bids</span>
+                        <div class="hero-card-price-tag">Current Bid: Rs. <?php echo $price; ?></div>
+                        <div class="hero-card-meta">
+                            <span><i class="fas fa-gavel"></i> <?php echo (int)$hi['bid_count']; ?> bids</span>
+                            <span><i class="fas fa-clock"></i> <?php echo $timer_str; ?></span>
                         </div>
                     </div>
                 </a>
@@ -1015,176 +1208,168 @@ include_once __DIR__ . '/includes/components/loading_spinner_overlay.php';
     </div>
 </section>
 
-<!-- ── Live Auctions Catalog Section ── -->
-<section class="section" id="live_auction">
-    <div class="section-inner">
-        <div class="section-header">
+<!-- ── Live Auctions Section ── -->
+<section class="section-wrap" id="live_auction">
+    <div class="container">
+        <div class="section-header-row">
             <div>
-                <h2 class="section-title"><span class="text-emerald">Live</span> Auctions Arena</h2>
-                <p class="section-sub">Hand-picked active auction lots with real-time bidding activity</p>
+                <span class="section-badge"><i class="fas fa-broadcast-tower"></i> Live & Trending</span>
+                <h2 class="section-heading">Featured Live Auctions</h2>
+                <p class="section-subheading">High-activity lots currently in active bidding rounds</p>
             </div>
-            <a href="items.php" class="section-link">
-                View all items <i class="fas fa-arrow-right ms-1"></i>
+            <a href="items.php" class="section-action-link">
+                View all auctions <i class="fas fa-arrow-right"></i>
             </a>
         </div>
 
         <?php if (!empty($featured_items)): ?>
             <div class="catalog-grid">
-                <?php foreach ($featured_items as $item): ?>
-                    <?php render_unified_item_card($item, $user_role, $user_id); ?>
-                <?php endforeach; ?>
+            <?php foreach ($featured_items as $item): ?>
+                <?php render_unified_item_card($item, $user_role, $user_id); ?>
+            <?php endforeach; ?>
             </div>
         <?php else: ?>
-            <div class="text-center py-5 bg-white rounded-4 border p-4">
-                <div class="mb-3 text-emerald" style="font-size: 48px;">
-                    <i class="fas fa-gavel"></i>
-                </div>
-                <h4 class="fw-bold mb-2">No Active Auctions at this Moment</h4>
-                <p class="text-muted mb-4">Be the first seller to list an item or check back in a few minutes!</p>
+            <div style="background:#ffffff; border:1px solid #e2e8f0; border-radius:16px; padding:60px 20px; text-align:center;">
+                <div style="font-size:48px; color:#cbd5e1; margin-bottom:14px;"><i class="fas fa-gavel"></i></div>
+                <h3 style="font-size:20px; font-weight:700; color:#0f172a; margin-bottom:8px;">No Live Auctions Active</h3>
+                <p style="color:#64748b; margin-bottom:20px;">Be the first seller to list a featured lot on Geo Auction!</p>
                 <?php if ($is_logged): ?>
-                    <a href="user/add_items.php" class="btn btn-emerald px-4 py-2">
-                        <i class="fas fa-plus-circle me-1"></i> List Your First Item
-                    </a>
+                    <a href="user/add_items.php" class="btn-hero-primary" style="display:inline-flex;">Create New Listing</a>
                 <?php else: ?>
-                    <a href="login.php" class="btn btn-emerald px-4 py-2">
-                        <i class="fas fa-sign-in-alt me-1"></i> Login to List Item
-                    </a>
+                    <a href="login.php" class="btn-hero-primary" style="display:inline-flex;">Login to List an Item</a>
                 <?php endif; ?>
             </div>
         <?php endif; ?>
     </div>
 </section>
 
-<!-- ── Categories Section ── -->
-<section class="section section-alt" id="category">
-    <div class="section-inner">
-        <div class="section-header">
+<!-- ── Browse by Category Section ── -->
+<section class="section-wrap section-alt" id="category">
+    <div class="container">
+        <div class="section-header-row">
             <div>
-                <h2 class="section-title">Explore by <span class="text-emerald">Category</span></h2>
-                <p class="section-sub">Browse thousands of items across top trending categories</p>
+                <span class="section-badge"><i class="fas fa-layer-group"></i> Discovery</span>
+                <h2 class="section-heading">Browse by Category</h2>
+                <p class="section-subheading">Filter through verified auctions across popular categories</p>
             </div>
-            <a href="category.php" class="section-link">
-                All categories <i class="fas fa-arrow-right ms-1"></i>
+            <a href="category.php" class="section-action-link">
+                All categories <i class="fas fa-arrow-right"></i>
             </a>
         </div>
 
-        <div class="grid-categories">
-            <?php 
-            $cat_icons = [
-                'Electronics' => 'fa-laptop',
-                'Vehicles'    => 'fa-car',
-                'Motors'      => 'fa-motorcycle',
-                'Jewelry'     => 'fa-gem',
-                'Art'         => 'fa-palette',
-                'Sports'      => 'fa-futbol',
-                'Furniture'   => 'fa-couch',
-                'Watches'     => 'fa-stopwatch',
-                'Fashion'     => 'fa-tshirt',
-                'Antiques'    => 'fa-monument',
+        <div class="categories-grid">
+        <?php if (!empty($categories)): ?>
+            <?php foreach ($categories as $cat):
+                $cat_link = "category.php?id={$cat['id']}";
+                $cat_icon = !empty($cat['icon']) ? $cat['icon'] : 'fa-tag';
+            ?>
+            <a href="<?php echo $cat_link; ?>" class="cat-box">
+                <div class="cat-icon-wrap">
+                    <i class="fas <?php echo htmlspecialchars($cat_icon); ?>"></i>
+                </div>
+                <div>
+                    <div class="cat-info-name"><?php echo htmlspecialchars($cat['name']); ?></div>
+                    <div class="cat-info-count"><?php echo (int)$cat['item_count']; ?> active auctions</div>
+                </div>
+            </a>
+            <?php endforeach; ?>
+        <?php else: ?>
+            <?php
+            $def_cats = [
+                ['fa-laptop','Electronics','45+ active lots'],
+                ['fa-car','Vehicles','28+ active lots'],
+                ['fa-gem','Jewelry & Gold','19+ active lots'],
+                ['fa-paint-brush','Art & Collectibles','14+ active lots'],
+                ['fa-futbol','Sports & Memorabilia','12+ active lots'],
+                ['fa-couch','Furniture & Decor','22+ active lots'],
+                ['fa-book','Books & Manuscripts','8+ active lots'],
+                ['fa-tshirt','Fashion & Watches','35+ active lots']
             ];
-
-            if (!empty($categories)):
-                foreach ($categories as $cat):
-                    $cname = $cat['name'];
-                    $icon = $cat['icon'] ?? ($cat_icons[$cname] ?? 'fa-tag');
-            ?>
-                <a href="category.php?id=<?php echo (int)$cat['id']; ?>" class="cat-card">
-                    <div class="cat-card-icon">
-                        <i class="fas <?php echo htmlspecialchars($icon); ?>"></i>
-                    </div>
-                    <div class="cat-card-name"><?php echo htmlspecialchars($cname); ?></div>
-                    <div class="cat-card-count"><?php echo (int)$cat['item_count']; ?> active listings</div>
-                </a>
-            <?php 
-                endforeach;
-            else:
-                $default_categories = [
-                    ['fa-car', 'Vehicles', 'Motorcycles, sedans, luxury cars'],
-                    ['fa-laptop', 'Electronics', 'Smartphones, laptops, cameras'],
-                    ['fa-gem', 'Jewelry & Watches', 'Rings, luxury Swiss timepieces'],
-                    ['fa-palette', 'Fine Art', 'Paintings, bronze sculptures, prints'],
-                    ['fa-couch', 'Home & Living', 'Antique furniture, interior decor'],
-                    ['fa-futbol', 'Sports & Collectibles', 'Signed memorabilia, trading cards'],
-                    ['fa-tshirt', 'Fashion & Apparel', 'Designer bags, shoes, luxury wear'],
-                    ['fa-monument', 'Antiques & Curios', 'Vintage artifacts, rare coins']
-                ];
-                foreach ($default_categories as $dc):
-            ?>
-                <a href="items.php?category=<?php echo urlencode($dc[1]); ?>" class="cat-card">
-                    <div class="cat-card-icon">
-                        <i class="fas <?php echo $dc[0]; ?>"></i>
-                    </div>
-                    <div class="cat-card-name"><?php echo $dc[1]; ?></div>
-                    <div class="cat-card-count">Browse collection</div>
-                </a>
-            <?php 
-                endforeach;
-            endif; 
-            ?>
+            foreach ($def_cats as $dc): ?>
+            <a href="category.php" class="cat-box">
+                <div class="cat-icon-wrap"><i class="fas <?php echo $dc[0]; ?>"></i></div>
+                <div>
+                    <div class="cat-info-name"><?php echo $dc[1]; ?></div>
+                    <div class="cat-info-count"><?php echo $dc[2]; ?></div>
+                </div>
+            </a>
+            <?php endforeach; ?>
+        <?php endif; ?>
         </div>
     </div>
 </section>
 
 <!-- ── How It Works Section ── -->
-<section class="section" id="about">
-    <div class="section-inner">
-        <div class="text-center mb-5">
-            <h2 class="section-title">How <span class="text-emerald">Geo Auction</span> Works</h2>
-            <p class="section-sub">Start winning live auctions in 3 straightforward steps</p>
+<section class="section-wrap" id="about">
+    <div class="container">
+        <div style="text-align:center; max-width:640px; margin:0 auto 48px;">
+            <span class="section-badge"><i class="fas fa-shield-alt"></i> Simple & Secure</span>
+            <h2 class="section-heading">How Geo Auction Works</h2>
+            <p class="section-subheading">Get started in three seamless steps and win lots with total transparency.</p>
         </div>
 
-        <div class="steps">
-            <div class="step-item">
-                <div class="step-num">1</div>
-                <h4 class="step-title">Create Free Account</h4>
-                <p class="step-desc">Register in under 60 seconds with verified security. Access your customized dashboard and watchlists immediately.</p>
+        <div class="how-steps-grid">
+            <div class="step-card">
+                <div class="step-badge-num">1</div>
+                <h3 class="step-title">Create Free Account</h3>
+                <p class="step-desc">
+                    Register in under 60 seconds with email verification. Get access to thousands of live auctions immediately.
+                </p>
             </div>
-            <div class="step-item">
-                <div class="step-num">2</div>
-                <h4 class="step-title">Fund Your Wallet</h4>
-                <p class="step-desc">Top up securely via Bank Transfer or Cards. Your funds remain in safe escrow and are only debited upon winning an auction.</p>
+            <div class="step-card">
+                <div class="step-badge-num">2</div>
+                <h3 class="step-title">Fund Wallet & Bid</h3>
+                <p class="step-desc">
+                    Top up your secure bidding wallet. Place real-time bids with instant counter-bid alerts and automated limits.
+                </p>
             </div>
-            <div class="step-item">
-                <div class="step-num">3</div>
-                <h4 class="step-title">Bid, Outbid & Win</h4>
-                <p class="step-desc">Place live competitive bids or setup automated proxy bidding. Win the auction and receive your item with tracked shipping.</p>
+            <div class="step-card">
+                <div class="step-badge-num">3</div>
+                <h3 class="step-title">Win & Receive</h3>
+                <p class="step-desc">
+                    When the hammer falls, settlement is instant from your escrow wallet. Coordinate safe doorstep handover or pickup.
+                </p>
             </div>
         </div>
-
         <?php if (!$is_logged): ?>
-            <div class="text-center mt-5">
-                <a href="register.php" class="btn btn-emerald btn-lg px-5 py-3">
-                    <i class="fas fa-rocket me-2"></i> Join Geo Auction Free
-                </a>
-            </div>
+        <div style="text-align:center; margin-top:40px;">
+            <a href="register.php" class="btn-hero-primary" style="display:inline-flex;">
+                <i class="fas fa-rocket"></i> Get Started Today — Join Free
+            </a>
+        </div>
         <?php endif; ?>
     </div>
 </section>
-
-<!-- ── Top Seller Showcase Section ── -->
-<?php if ($top_seller): ?>
-<section class="section section-alt">
-    <div class="section-inner">
-        <div class="section-header">
+<?php if (!empty($top_sellers)): ?>
+<section class="section-wrap section-alt">
+    <div class="container">
+        <div class="section-header-row">
             <div>
-                <h2 class="section-title">Featured <span class="text-emerald">Top Seller</span></h2>
-                <p class="section-sub">Recognized for verified listings, quick dispatch, and high customer satisfaction</p>
+                <span class="section-badge"><i class="fas fa-star"></i> Trusted Community</span>
+                <h2 class="section-heading">Top Rated Sellers</h2>
+                <p class="section-subheading">Our most active verified sellers with 100% positive fulfillment record</p>
             </div>
         </div>
-
-        <div class="seller-showcase-box">
-            <div class="seller-avatar-large">
-                <?php echo strtoupper(substr($top_seller['name'], 0, 2)); ?>
-            </div>
-            <div>
-                <div class="seller-name-large"><?php echo htmlspecialchars($top_seller['name']); ?></div>
-                <span class="seller-meta-tag">
-                    <i class="fas fa-shield-alt"></i> Verified Top Rated
-                </span>
-                <div class="text-muted small mt-1">
-                    <i class="fas fa-box-open text-emerald me-1"></i> <?php echo (int)$top_seller['item_count']; ?> auction lots successfully hosted
+        <div class="sellers-grid">
+            <?php foreach ($top_sellers as $seller):
+                $initials = strtoupper(substr($seller['name'], 0, 2));
+                $s_avatar = $seller['avatar'] ?? '';
+            ?>
+            <div class="seller-badge-card">
+                <div class="seller-avatar-large">
+                    <?php if (!empty($s_avatar)): ?>
+                        <img src="<?php echo htmlspecialchars($s_avatar); ?>" alt="<?php echo htmlspecialchars($seller['name']); ?>">
+                    <?php else: ?>
+                        <?php echo $initials; ?>
+                    <?php endif; ?>
+                </div>
+                <div>
+                    <div class="seller-info-title"><?php echo htmlspecialchars($seller['name']); ?></div>
+                    <div class="seller-rank-tag"><i class="fas fa-check-circle"></i> Verified Seller</div>
+                    <div class="seller-items-count"><i class="fas fa-box me-1"></i> <?php echo (int)$seller['item_count']; ?> items listed</div>
                 </div>
             </div>
+            <?php endforeach; ?>
         </div>
     </div>
 </section>
@@ -1192,19 +1377,21 @@ include_once __DIR__ . '/includes/components/loading_spinner_overlay.php';
 
 <!-- ── Call to Action Banner ── -->
 <?php if (!$is_logged): ?>
-<section class="py-5" style="background: linear-gradient(135deg, #091e17 0%, #047857 100%);">
-    <div class="section-inner text-center text-white py-4">
-        <h2 class="fw-bold mb-3" style="font-size: 2.25rem;">Ready to Place Your First Bid?</h2>
-        <p class="text-white-50 mb-4" style="font-size: 1.1rem; max-width: 600px; margin: 0 auto 24px auto;">
-            Join verified bidders across the nation. Transparent pricing, instant notifications, and dedicated buyer support.
-        </p>
-        <div class="d-flex justify-content-center gap-3 flex-wrap">
-            <a href="login.php" class="btn btn-gold btn-lg px-4 py-3">
-                <i class="fas fa-sign-in-alt me-2"></i> Sign In to Account
-            </a>
-            <a href="register.php" class="btn btn-outline-light btn-lg px-4 py-3">
-                <i class="fas fa-user-plus me-2"></i> Register New Member
-            </a>
+<section class="cta-banner">
+    <div class="container">
+        <div class="cta-banner-inner">
+            <h2 class="cta-banner-title">Ready to Experience Live Bidding?</h2>
+            <p class="cta-banner-sub">
+                Join thousands of certified bidders across Pakistan and beyond. Zero hidden charges. Complete escrow protection.
+            </p>
+            <div class="cta-banner-actions">
+                <a href="register.php" class="btn-hero-primary" style="background:#ffffff; color:#047857 !important; border:none; box-shadow:0 8px 20px rgba(0,0,0,0.2);">
+                    <i class="fas fa-user-plus"></i> Register Free Now
+                </a>
+                <a href="login.php" class="btn-hero-secondary">
+                    <i class="fas fa-sign-in-alt"></i> Login to Account
+                </a>
+            </div>
         </div>
     </div>
 </section>
@@ -1212,221 +1399,116 @@ include_once __DIR__ . '/includes/components/loading_spinner_overlay.php';
 
 <!-- ── Site Footer ── -->
 <footer class="site-footer">
-    <div class="footer-inner">
-        <div class="footer-grid">
-            <!-- Brand Column -->
-            <div>
-                <div class="footer-brand-logo">
-                    <img src="assets/image/Geo-auction.png" alt="Geo Auction" onerror="this.onerror=null;this.src='assets/image/geo-auction.png'">
-                </div>
-                <p class="footer-brand-text">
-                    Geo Auction is Pakistan's premier live auction platform connecting verified buyers and trusted sellers with real-time bidding technology.
+    <div class="container">
+        <div class="footer-grid-layout">
+            <div class="footer-brand-box">
+                <img src="assets/image/Geo-auction-logo-clean.png" alt="Geo Auction" onerror="this.onerror=null;this.src='assets/image/Geo-auction.png'">
+                <p class="footer-brand-desc">
+                    Geo Auction is Pakistan's premier live auction platform connecting authentic buyers and sellers in real time. Bid smart, win big.
                 </p>
-            </div>
-
-            <!-- Platform Links -->
-            <div>
-                <div class="footer-col-title">Platform</div>
-                <div class="footer-links">
-                    <a href="live_auction.php">Live Auctions</a>
-                    <a href="items.php">Catalog Marketplace</a>
-                    <a href="category.php">Categories</a>
-                    <a href="search.php">Search Lots</a>
-                    <a href="about.php">About Us</a>
+                <div class="footer-social-links">
+                    <a href="#" aria-label="Facebook"><i class="fab fa-facebook-f"></i></a>
+                    <a href="#" aria-label="Twitter"><i class="fab fa-x-twitter"></i></a>
+                    <a href="#" aria-label="Instagram"><i class="fab fa-instagram"></i></a>
+                    <a href="#" aria-label="LinkedIn"><i class="fab fa-linkedin-in"></i></a>
                 </div>
             </div>
-
-            <!-- Account Links -->
             <div>
-                <div class="footer-col-title">Account</div>
-                <div class="footer-links">
+                <h4 class="footer-title">Platform</h4>
+                <ul class="footer-menu">
+                    <li><a href="items.php">Live Auctions</a></li>
+                    <li><a href="category.php">Categories</a></li>
+                    <li><a href="search.php">Search Lots</a></li>
+                    <li><a href="#about">How It Works</a></li>
+                </ul>
+            </div>
+            <div>
+                <h4 class="footer-title">Account</h4>
+                <ul class="footer-menu">
+                    <li><a href="login.php">Login</a></li>
+                    <li><a href="register.php">Create Account</a></li>
                     <?php if ($is_logged): ?>
-                        <a href="dashboard.php">My Dashboard</a>
-                        <a href="user/wallet.php">Wallet & Balance</a>
-                        <a href="notifications.php">Notifications</a>
-                        <a href="messages.php">Messages</a>
-                        <a href="logout.php">Sign Out</a>
+                        <li><a href="user/dashboard.php">Dashboard</a></li>
+                        <li><a href="user/my_auctions.php">My Auctions</a></li>
                     <?php else: ?>
-                        <a href="login.php">Sign In</a>
-                        <a href="register.php">Create Account</a>
-                        <a href="forgot_password.php">Forgot Password</a>
+                        <li><a href="login.php">Wallet Overview</a></li>
+                        <li><a href="login.php">Buyer Protection</a></li>
                     <?php endif; ?>
-                </div>
+                </ul>
             </div>
-
-            <!-- Sellers & Legal -->
             <div>
-                <div class="footer-col-title">Sellers & Help</div>
-                <div class="footer-links">
+                <h4 class="footer-title">Sellers & Support</h4>
+                <ul class="footer-menu">
                     <?php if ($is_logged): ?>
-                        <a href="user/add_items.php">List an Item</a>
-                        <a href="user/my_auctions.php">My Listings</a>
+                        <li><a href="user/add_items.php">List an Item</a></li>
+                        <li><a href="user/my_auctions.php">My Listings</a></li>
                     <?php else: ?>
-                        <a href="login.php">Sell on Geo Auction</a>
+                        <li><a href="login.php">Become a Seller</a></li>
+                        <li><a href="login.php">Seller Fees & Escrow</a></li>
                     <?php endif; ?>
-                    <a href="contact.php">Contact Support</a>
-                    <a href="about.php">Terms of Service</a>
-                </div>
+                    <li><a href="contact.php">Contact Support</a></li>
+                    <li><a href="terms.php">Terms of Service</a></li>
+                </ul>
             </div>
         </div>
 
-        <div class="footer-bottom">
-            <span>&copy; <?php echo date('Y'); ?> Geo Auction System. All rights reserved.</span>
-            <span><i class="fas fa-shield-alt text-emerald me-1"></i> Secure Escrow Protected Bidding</span>
+        <div class="footer-divider">
+            <span>&copy; <?php echo date('Y'); ?> GeoAuction. All rights reserved.</span>
+            <span><i class="fas fa-lock me-1"></i> 256-Bit SSL Encrypted & Escrow Protected</span>
         </div>
     </div>
 </footer>
 
-<!-- ── Scripts: Bootstrap 5, AJAX & Live Timers ── -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-
+<!-- ── Scripts ── -->
 <script>
-const IS_USER_LOGGED_IN = <?php echo $is_logged ? 'true' : 'false'; ?>;
-const LOGIN_REDIRECT_URL = 'login.php';
+// Mobile Drawer Toggle
+const mobileBtn = document.getElementById('mobileMenuToggle');
+const mobileDrawer = document.getElementById('mobileDrawer');
+if (mobileBtn && mobileDrawer) {
+    mobileBtn.addEventListener('click', function() {
+        mobileDrawer.classList.toggle('open');
+    });
+}
 
-// ── Smart Authentication Interceptor for Guests ──
-// Allows guests to freely browse, open quick view modals, view categories, and search.
-// Only intercepts protected transactional actions (like placing a bid, messaging seller, or checking out).
-document.addEventListener('click', function(e) {
-    if (IS_USER_LOGGED_IN) return;
-
-    // Check if the clicked element or its parent is an authenticated-only trigger
-    const authTrigger = e.target.closest('.auth-required, .geo-btn-bid, .geo-btn-buy, #qvActionPrimary, #qvActionMessage');
-    if (authTrigger) {
-        e.preventDefault();
-        e.stopPropagation();
-        
-        if (typeof Swal !== 'undefined') {
-            Swal.fire({
-                icon: 'info',
-                title: 'Sign In Required',
-                text: 'Please sign in or register for free to place live bids or contact sellers.',
-                showCancelButton: true,
-                confirmButtonText: '<i class="fas fa-sign-in-alt me-1"></i> Sign In',
-                cancelButtonText: 'Cancel',
-                confirmButtonColor: '#047857',
-                cancelButtonColor: '#64748b'
-            }).then((result) => {
-                if (result.isConfirmed) {
-                    window.location.href = LOGIN_REDIRECT_URL;
-                }
-            });
-        } else {
-            window.location.href = LOGIN_REDIRECT_URL;
-        }
-    }
-});
-
-// ── Real-Time Countdown Timer Updater ──
-function updateLiveAuctionTimers() {
-    const timerElements = document.querySelectorAll('.stat-timer-val[data-end-timestamp]');
+// Live Countdown Updater (Card & Catalog sync)
+function updateAllCountdowns() {
+    const timerElements = document.querySelectorAll('.stat-timer-val[data-end-timestamp], .geo-timer-val[data-end-ts]');
     const now = Math.floor(Date.now() / 1000);
-
-    timerElements.forEach(el => {
-        const endTs = parseInt(el.getAttribute('data-end-timestamp'), 10);
-        if (!endTs || isNaN(endTs)) return;
-        
-        const diff = Math.max(0, endTs - now);
+    timerElements.forEach(function(el) {
+        const endTs = parseInt(el.getAttribute('data-end-timestamp') || el.getAttribute('data-end-ts'), 10);
+        if (!endTs) return;
+        const diff = endTs - now;
         if (diff <= 0) {
             el.textContent = 'Ended';
-            el.classList.add('text-danger');
+            el.classList.add('urgent');
             return;
         }
-
         const d = Math.floor(diff / 86400);
         const h = Math.floor((diff % 86400) / 3600);
         const m = Math.floor((diff % 3600) / 60);
         const s = diff % 60;
-
         if (d > 0) {
-            el.textContent = `${d}d : ${h}h left`;
+            el.textContent = d + 'd ' + h + 'h';
         } else if (h > 0) {
-            el.textContent = `${h}h : ${m}m : ${s}s`;
+            el.textContent = h + 'h ' + m + 'm';
         } else {
-            el.textContent = `${m}m : ${s}s left`;
-            el.classList.add('text-danger', 'fw-bold');
+            el.textContent = m + 'm ' + s + 's';
+            el.classList.add('urgent');
         }
     });
 }
-setInterval(updateLiveAuctionTimers, 1000);
-updateLiveAuctionTimers();
+setInterval(updateAllCountdowns, 1000);
+updateAllCountdowns();
 
-// ── AJAX Live Search Autocomplete ──
-const searchInput = document.getElementById('navSearchInput');
-const searchResults = document.getElementById('navSearchResults');
-let searchDebounceTimer = null;
-
-if (searchInput && searchResults) {
-    searchInput.addEventListener('input', function() {
-        const q = this.value.trim();
-        clearTimeout(searchDebounceTimer);
-
-        if (q.length < 2) {
-            searchResults.style.display = 'none';
-            searchResults.innerHTML = '';
-            return;
-        }
-
-        searchDebounceTimer = setTimeout(() => {
-            fetch(`ajax/search.php?q=${encodeURIComponent(q)}`)
-                .then(res => res.json())
-                .then(data => {
-                    if (data.success && data.results && data.results.length > 0) {
-                        let html = '';
-                        data.results.forEach(item => {
-                            html += `
-                                <a href="${item.url}" class="search-result-item">
-                                    <div>
-                                        <div class="search-result-title">${escapeHtml(item.title)}</div>
-                                        <small class="text-muted" style="font-size:11px;">${escapeHtml(item.category)}</small>
-                                    </div>
-                                    <div class="search-result-price">${item.price}</div>
-                                </a>
-                            `;
-                        });
-                        html += `
-                            <div class="p-2 text-center bg-light border-top">
-                                <a href="search.php?q=${encodeURIComponent(q)}" class="text-emerald small fw-bold text-decoration-none">
-                                    View all matching lots →
-                                </a>
-                            </div>
-                        `;
-                        searchResults.innerHTML = html;
-                        searchResults.style.display = 'block';
-                    } else {
-                        searchResults.innerHTML = '<div class="p-3 text-center text-muted small">No auctions match your search.</div>';
-                        searchResults.style.display = 'block';
-                    }
-                })
-                .catch(() => {
-                    searchResults.style.display = 'none';
-                });
-        }, 250);
-    });
-
-    // Close search dropdown on click outside
-    document.addEventListener('click', function(e) {
-        if (!searchInput.contains(e.target) && !searchResults.contains(e.target)) {
-            searchResults.style.display = 'none';
-        }
-    });
-}
-
-function escapeHtml(text) {
-    if (!text) return '';
-    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-    return text.replace(/[&<>"']/g, m => map[m]);
-}
-
-// ── Smooth Logout Spinner ──
+// Intercept Logout clicks to show smooth spinner
 document.addEventListener('click', function(e) {
     const logoutLink = e.target.closest('a[href*="logout"], .logout-btn');
-    if (logoutLink) {
+    if (logoutLink && !logoutLink.hasAttribute('data-no-loader')) {
         const targetHref = logoutLink.getAttribute('href');
         if (targetHref && targetHref !== '#' && !targetHref.startsWith('javascript:')) {
             e.preventDefault();
             if (typeof showLoader === 'function') {
-                showLoader('Signing out safely...');
+                showLoader('Logging out, please wait...');
             }
             setTimeout(function() {
                 window.location.href = targetHref;
@@ -1436,12 +1518,7 @@ document.addEventListener('click', function(e) {
 });
 </script>
 
-<?php 
-// Render unified auction card assets (Quick View Modal & Card Carousels)
-if (function_exists('render_unified_card_assets')) {
-    render_unified_card_assets(); 
-}
-?>
+<?php render_unified_card_assets(); ?>
 
 </body>
 </html>

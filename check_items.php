@@ -1,0 +1,2 @@
+<?php
+// clean check file

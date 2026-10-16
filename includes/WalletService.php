@@ -12,8 +12,9 @@
 class WalletService {
     private mysqli $conn;
 
-    public function __construct(mysqli $conn) {
-        $this->conn = $conn;
+    public function __construct(?mysqli $conn = null) {
+        require_once __DIR__ . '/Database.php';
+        $this->conn = $conn ?? Database::getMysqli();
     }
 
     /**
@@ -227,6 +228,46 @@ class WalletService {
         } catch (Exception $e) {
             mysqli_rollback($this->conn);
             throw $e;
+        }
+    }
+
+    /**
+     * Settle Bid Win:
+     * Captures active lock on winning auction and marks as SETTLED.
+     */
+    public function settleBidWin(int $userId, int $auctionId): bool {
+        mysqli_begin_transaction($this->conn);
+        try {
+            $stmt = mysqli_prepare($this->conn, "SELECT id FROM wallets WHERE user_id = ? FOR UPDATE");
+            mysqli_stmt_bind_param($stmt, "i", $userId);
+            mysqli_stmt_execute($stmt);
+            $wallet = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
+            mysqli_stmt_close($stmt);
+
+            if (!$wallet) {
+                mysqli_rollback($this->conn);
+                return false;
+            }
+
+            $l_stmt = mysqli_prepare($this->conn, "SELECT id, amount FROM wallet_locks WHERE wallet_id = ? AND auction_id = ? AND status = 'ACTIVE' FOR UPDATE");
+            mysqli_stmt_bind_param($l_stmt, "ii", $wallet['id'], $auctionId);
+            mysqli_stmt_execute($l_stmt);
+            $lock = mysqli_fetch_assoc(mysqli_stmt_get_result($l_stmt));
+            mysqli_stmt_close($l_stmt);
+
+            if ($lock) {
+                $up_l = mysqli_prepare($this->conn, "UPDATE wallet_locks SET status = 'SETTLED', updated_at = NOW() WHERE id = ?");
+                mysqli_stmt_bind_param($up_l, "i", $lock['id']);
+                mysqli_stmt_execute($up_l);
+                mysqli_stmt_close($up_l);
+            }
+
+            mysqli_commit($this->conn);
+            return true;
+        } catch (Exception $e) {
+            mysqli_rollback($this->conn);
+            error_log("settleBidWin error: " . $e->getMessage());
+            return false;
         }
     }
 

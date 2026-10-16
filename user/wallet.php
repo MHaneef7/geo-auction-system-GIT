@@ -54,51 +54,57 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             } elseif ($deposit_amount > 5000000) {
                 $error_msg = 'Maximum single top-up amount is Rs. 5,000,000.';
             } else {
-                mysqli_begin_transaction($conn);
+                $pdo->beginTransaction();
                 try {
                     // Lock and fetch current balance from users table
-                    $stmt = mysqli_prepare($conn, "SELECT balance FROM users WHERE id = ? FOR UPDATE");
-                    mysqli_stmt_bind_param($stmt, "i", $user_id);
-                    mysqli_stmt_execute($stmt);
-                    $res = mysqli_stmt_get_result($stmt);
-                    $u_row = mysqli_fetch_assoc($res);
-                    mysqli_stmt_close($stmt);
+                    $stmt = $pdo->prepare("SELECT balance FROM users WHERE id = :id FOR UPDATE");
+                    $stmt->execute([':id' => $user_id]);
+                    $u_row = $stmt->fetch(PDO::FETCH_ASSOC);
 
                     $balance_before = (float)($u_row['balance'] ?? 0);
                     $balance_after  = $balance_before + $deposit_amount;
 
                     // Update user balance in users table
-                    $up_stmt = mysqli_prepare($conn, "UPDATE users SET balance = ? WHERE id = ?");
-                    mysqli_stmt_bind_param($up_stmt, "di", $balance_after, $user_id);
-                    mysqli_stmt_execute($up_stmt);
-                    mysqli_stmt_close($up_stmt);
+                    $up_stmt = $pdo->prepare("UPDATE users SET balance = :bal WHERE id = :id");
+                    $up_stmt->execute([':bal' => $balance_after, ':id' => $user_id]);
 
-                    // Sync with enterprise wallets table
-                    $up_w = mysqli_prepare($conn, "
-                        INSERT INTO wallets (user_id, currency, available_balance, locked_balance, status, updated_at)
-                        VALUES (?, 'PKR', ?, 0.0000, 'ACTIVE', NOW())
-                        ON DUPLICATE KEY UPDATE available_balance = ?, updated_at = NOW()
-                    ");
-                    if ($up_w) {
-                        mysqli_stmt_bind_param($up_w, "idd", $user_id, $balance_after, $balance_after);
-                        mysqli_stmt_execute($up_w);
-                        mysqli_stmt_close($up_w);
+                    // Sync with enterprise wallets table if it exists
+                    try {
+                        $up_w = $pdo->prepare("
+                            INSERT INTO wallets (user_id, currency, available_balance, locked_balance, status, updated_at)
+                            VALUES (:uid, 'PKR', :bal1, 0.0000, 'ACTIVE', NOW())
+                            ON DUPLICATE KEY UPDATE available_balance = :bal2, updated_at = NOW()
+                        ");
+                        $up_w->execute([
+                            ':uid'  => $user_id,
+                            ':bal1' => $balance_after,
+                            ':bal2' => $balance_after
+                        ]);
+                    } catch (Exception $we) {
+                        // Wallets table sync fallback
                     }
 
                     $desc = "Wallet top-up via " . htmlspecialchars($payment_method) . " (Ref: " . htmlspecialchars($tx_ref) . ")";
-                    $tx_stmt = mysqli_prepare($conn, "
+                    $tx_stmt = $pdo->prepare("
                         INSERT INTO transactions 
                         (user_id, type, amount, balance_before, balance_after, reference_id, description, status, created_at) 
-                        VALUES (?, 'deposit', ?, ?, ?, ?, ?, 'completed', NOW())
+                        VALUES (:uid, 'deposit', :amt, :bb, :ba, :ref, :desc, 'completed', NOW())
                     ");
-                    mysqli_stmt_bind_param($tx_stmt, "idddss", $user_id, $deposit_amount, $balance_before, $balance_after, $tx_ref, $desc);
-                    mysqli_stmt_execute($tx_stmt);
-                    mysqli_stmt_close($tx_stmt);
+                    $tx_stmt->execute([
+                        ':uid'  => $user_id,
+                        ':amt'  => $deposit_amount,
+                        ':bb'   => $balance_before,
+                        ':ba'   => $balance_after,
+                        ':ref'  => $tx_ref,
+                        ':desc' => $desc
+                    ]);
 
-                    mysqli_commit($conn);
+                    $pdo->commit();
                     $success_msg = "Successfully added Rs. " . number_format($deposit_amount, 2) . " to your wallet!";
                 } catch (Exception $e) {
-                    mysqli_rollback($conn);
+                    if ($pdo->inTransaction()) {
+                        $pdo->rollBack();
+                    }
                     $error_msg = "Deposit failed: " . $e->getMessage();
                 }
             }
@@ -116,62 +122,66 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
             } elseif ($bank_name === '' || $account_title === '' || $account_number === '') {
                 $error_msg = 'Please provide complete bank or mobile wallet account details.';
             } else {
-                mysqli_begin_transaction($conn);
+                $pdo->beginTransaction();
                 try {
                     // Lock and verify available balance
-                    $stmt = mysqli_prepare($conn, "SELECT balance FROM users WHERE id = ? FOR UPDATE");
-                    mysqli_stmt_bind_param($stmt, "i", $user_id);
-                    mysqli_stmt_execute($stmt);
-                    $res = mysqli_stmt_get_result($stmt);
-                    $u_row = mysqli_fetch_assoc($res);
-                    mysqli_stmt_close($stmt);
+                    $stmt = $pdo->prepare("SELECT balance FROM users WHERE id = :id FOR UPDATE");
+                    $stmt->execute([':id' => $user_id]);
+                    $u_row = $stmt->fetch(PDO::FETCH_ASSOC);
 
                     $available_balance = (float)($u_row['balance'] ?? 0);
 
                     if ($withdraw_amount > $available_balance) {
-                        mysqli_rollback($conn);
+                        if ($pdo->inTransaction()) {
+                            $pdo->rollBack();
+                        }
                         $error_msg = 'Insufficient available balance. You cannot withdraw more than your available funds.';
                     } else {
                         $balance_before = $available_balance;
                         $balance_after  = $balance_before - $withdraw_amount;
 
                         // Deduct balance in users table
-                        $up_stmt = mysqli_prepare($conn, "UPDATE users SET balance = ? WHERE id = ?");
-                        mysqli_stmt_bind_param($up_stmt, "di", $balance_after, $user_id);
-                        mysqli_stmt_execute($up_stmt);
-                        mysqli_stmt_close($up_stmt);
+                        $up_stmt = $pdo->prepare("UPDATE users SET balance = :bal WHERE id = :id");
+                        $up_stmt->execute([':bal' => $balance_after, ':id' => $user_id]);
 
-                        // Sync with enterprise wallets table
-                        $up_w = mysqli_prepare($conn, "
-                            UPDATE wallets 
-                            SET available_balance = ?, updated_at = NOW() 
-                            WHERE user_id = ?
-                        ");
-                        if ($up_w) {
-                            mysqli_stmt_bind_param($up_w, "di", $balance_after, $user_id);
-                            mysqli_stmt_execute($up_w);
-                            mysqli_stmt_close($up_w);
+                        // Sync with enterprise wallets table if it exists
+                        try {
+                            $up_w = $pdo->prepare("
+                                UPDATE wallets 
+                                SET available_balance = :bal, updated_at = NOW() 
+                                WHERE user_id = :uid
+                            ");
+                            $up_w->execute([':bal' => $balance_after, ':uid' => $user_id]);
+                        } catch (Exception $we) {
+                            // Wallets table sync fallback
                         }
 
                         // Insert into transactions as pending payout
                         $payout_ref = 'WD-' . strtoupper(substr(uniqid(), -8));
                         $desc = "Withdrawal to " . htmlspecialchars($bank_name) . " (" . htmlspecialchars($account_title) . " - " . htmlspecialchars($account_number) . ")";
                         
-                        $tx_stmt = mysqli_prepare($conn, "
+                        $tx_stmt = $pdo->prepare("
                             INSERT INTO transactions 
                             (user_id, type, amount, balance_before, balance_after, reference_id, description, status, created_at) 
-                            VALUES (?, 'withdraw', ?, ?, ?, ?, ?, 'pending', NOW())
+                            VALUES (:uid, 'withdraw', :amt, :bb, :ba, :ref, :desc, 'pending', NOW())
                         ");
                         $neg_amount = -$withdraw_amount;
-                        mysqli_stmt_bind_param($tx_stmt, "idddss", $user_id, $neg_amount, $balance_before, $balance_after, $payout_ref, $desc);
-                        mysqli_stmt_execute($tx_stmt);
-                        mysqli_stmt_close($tx_stmt);
+                        $tx_stmt->execute([
+                            ':uid'  => $user_id,
+                            ':amt'  => $neg_amount,
+                            ':bb'   => $balance_before,
+                            ':ba'   => $balance_after,
+                            ':ref'  => $payout_ref,
+                            ':desc' => $desc
+                        ]);
 
-                        mysqli_commit($conn);
+                        $pdo->commit();
                         $success_msg = "Withdrawal request of Rs. " . number_format($withdraw_amount, 2) . " submitted successfully! Funds will be transferred following verification.";
                     }
                 } catch (Exception $e) {
-                    mysqli_rollback($conn);
+                    if ($pdo->inTransaction()) {
+                        $pdo->rollBack();
+                    }
                     $error_msg = "Withdrawal failed: " . $e->getMessage();
                 }
             }
@@ -182,12 +192,9 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
 // -------------------------------------------------------------
 // 1. Fetch Current Available Balance
 // -------------------------------------------------------------
-$stmt_bal = mysqli_prepare($conn, "SELECT balance FROM users WHERE id = ?");
-mysqli_stmt_bind_param($stmt_bal, "i", $user_id);
-mysqli_stmt_execute($stmt_bal);
-$bal_res = mysqli_stmt_get_result($stmt_bal);
-$available_balance = (float)(mysqli_fetch_assoc($bal_res)['balance'] ?? 0);
-mysqli_stmt_close($stmt_bal);
+$stmt_bal = $pdo->prepare("SELECT balance FROM users WHERE id = :id");
+$stmt_bal->execute([':id' => $user_id]);
+$available_balance = (float)($stmt_bal->fetchColumn() ?: 0);
 
 // -------------------------------------------------------------
 // 2. Fetch Active Bid Guarantees / Locked Funds
@@ -197,67 +204,65 @@ $active_locks = [];
 $locked_balance = 0.00;
 
 // Query wallet_locks table for active locks via wallets join
-$locks_query = "
-    SELECT 
-        wl.id AS lock_id,
-        wl.amount AS bid_amount,
-        wl.created_at AS bid_time,
-        i.id AS item_id,
-        i.title,
-        i.auction_code,
-        i.end_time,
-        i.current_price
-    FROM wallet_locks wl
-    JOIN wallets w ON wl.wallet_id = w.id
-    JOIN items i ON wl.auction_id = i.id
-    WHERE w.user_id = ?
-      AND wl.status IN ('LOCKED', 'ACTIVE')
-      AND i.status = 'active'
-      AND (i.end_time IS NULL OR i.end_time > NOW())
-    ORDER BY wl.created_at DESC
-";
-$stmt_locks = mysqli_prepare($conn, $locks_query);
-if ($stmt_locks) {
-    mysqli_stmt_bind_param($stmt_locks, "i", $user_id);
-    mysqli_stmt_execute($stmt_locks);
-    $locks_res = mysqli_stmt_get_result($stmt_locks);
-    while ($lock = mysqli_fetch_assoc($locks_res)) {
-        $active_locks[] = $lock;
-        $locked_balance += (float)$lock['bid_amount'];
-    }
-    mysqli_stmt_close($stmt_locks);
-}
-
-// If no wallet_locks records exist, fallback to active winning bids
-if (empty($active_locks)) {
-    $fallback_bids_query = "
+try {
+    $locks_query = "
         SELECT 
-            b.id AS bid_id,
-            b.item_id,
-            b.bid_amount,
-            b.created_at AS bid_time,
+            wl.id AS lock_id,
+            wl.amount AS bid_amount,
+            wl.created_at AS bid_time,
+            i.id AS item_id,
             i.title,
             i.auction_code,
             i.end_time,
             i.current_price
-        FROM bids b
-        JOIN items i ON b.item_id = i.id
-        WHERE b.user_id = ?
+        FROM wallet_locks wl
+        JOIN wallets w ON wl.wallet_id = w.id
+        JOIN items i ON wl.auction_id = i.id
+        WHERE w.user_id = :uid
+          AND wl.status IN ('LOCKED', 'ACTIVE')
           AND i.status = 'active'
           AND (i.end_time IS NULL OR i.end_time > NOW())
-          AND b.bid_amount = (SELECT MAX(b2.bid_amount) FROM bids b2 WHERE b2.item_id = i.id)
-        ORDER BY b.bid_amount DESC
+        ORDER BY wl.created_at DESC
     ";
-    $stmt_fb = mysqli_prepare($conn, $fallback_bids_query);
-    if ($stmt_fb) {
-        mysqli_stmt_bind_param($stmt_fb, "i", $user_id);
-        mysqli_stmt_execute($stmt_fb);
-        $fb_res = mysqli_stmt_get_result($stmt_fb);
-        while ($fb = mysqli_fetch_assoc($fb_res)) {
+    $stmt_locks = $pdo->prepare($locks_query);
+    $stmt_locks->execute([':uid' => $user_id]);
+    while ($lock = $stmt_locks->fetch(PDO::FETCH_ASSOC)) {
+        $active_locks[] = $lock;
+        $locked_balance += (float)$lock['bid_amount'];
+    }
+} catch (Exception $le) {
+    // wallet_locks table might not exist
+}
+
+// If no wallet_locks records exist, fallback to active winning bids
+if (empty($active_locks)) {
+    try {
+        $fallback_bids_query = "
+            SELECT 
+                b.id AS bid_id,
+                b.item_id,
+                b.bid_amount,
+                b.created_at AS bid_time,
+                i.title,
+                i.auction_code,
+                i.end_time,
+                i.current_price
+            FROM bids b
+            JOIN items i ON b.item_id = i.id
+            WHERE b.user_id = :uid
+              AND i.status = 'active'
+              AND (i.end_time IS NULL OR i.end_time > NOW())
+              AND b.bid_amount = (SELECT MAX(b2.bid_amount) FROM bids b2 WHERE b2.item_id = i.id)
+            ORDER BY b.bid_amount DESC
+        ";
+        $stmt_fb = $pdo->prepare($fallback_bids_query);
+        $stmt_fb->execute([':uid' => $user_id]);
+        while ($fb = $stmt_fb->fetch(PDO::FETCH_ASSOC)) {
             $active_locks[] = $fb;
             $locked_balance += (float)$fb['bid_amount'];
         }
-        mysqli_stmt_close($stmt_fb);
+    } catch (Exception $fe) {
+        // Fallback query error handling
     }
 }
 
@@ -266,22 +271,21 @@ $total_balance = $available_balance + $locked_balance;
 // -------------------------------------------------------------
 // 3. Fetch Transaction History (Double-Entry Ledger)
 // -------------------------------------------------------------
-$history_query = "
-    SELECT id, type, amount, balance_before, balance_after, reference_id, description, status, created_at
-    FROM transactions
-    WHERE user_id = ?
-    ORDER BY created_at DESC
-    LIMIT 50
-";
-$stmt_hist = mysqli_prepare($conn, $history_query);
-mysqli_stmt_bind_param($stmt_hist, "i", $user_id);
-mysqli_stmt_execute($stmt_hist);
-$history_res = mysqli_stmt_get_result($stmt_hist);
 $transactions = [];
-while ($t = mysqli_fetch_assoc($history_res)) {
-    $transactions[] = $t;
+try {
+    $history_query = "
+        SELECT id, type, amount, balance_before, balance_after, reference_id, description, status, created_at
+        FROM transactions
+        WHERE user_id = :uid
+        ORDER BY created_at DESC
+        LIMIT 50
+    ";
+    $stmt_hist = $pdo->prepare($history_query);
+    $stmt_hist->execute([':uid' => $user_id]);
+    $transactions = $stmt_hist->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (Exception $he) {
+    $transactions = [];
 }
-mysqli_stmt_close($stmt_hist);
 
 include_once __DIR__ . '/../includes/header.php';
 ?>

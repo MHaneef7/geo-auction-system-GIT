@@ -19,26 +19,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif (strlen($password) < 6) {
             $error = "Password must be at least 6 characters long.";
         } else {
-            $stmt = mysqli_prepare($conn, "SELECT id FROM users WHERE reset_token = ? AND reset_token_expires_at > NOW() LIMIT 1");
-            mysqli_stmt_bind_param($stmt, "s", $token);
-            mysqli_stmt_execute($stmt);
-            $res = mysqli_stmt_get_result($stmt);
+            try {
+                $stmt = $pdo->prepare("SELECT id FROM users WHERE reset_token = :token AND reset_token_expires_at > NOW() LIMIT 1");
+                $stmt->execute([':token' => $token]);
+                $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-            if ($res && mysqli_num_rows($res) > 0) {
-                $user = mysqli_fetch_assoc($res);
-                $user_id = (int)$user['id'];
-                $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+                if ($user) {
+                    $user_id = (int)$user['id'];
+                    $hashed_password = password_hash($password, PASSWORD_DEFAULT);
 
-                $update_stmt = mysqli_prepare($conn, "UPDATE users SET password = ?, reset_token = NULL, reset_token_expires_at = NULL WHERE id = ?");
-                mysqli_stmt_bind_param($update_stmt, "si", $hashed_password, $user_id);
-                mysqli_stmt_execute($update_stmt);
-                mysqli_stmt_close($update_stmt);
+                    $upStmt = $pdo->prepare("UPDATE users SET password = :pw, reset_token = NULL, reset_token_expires_at = NULL WHERE id = :id");
+                    $upStmt->execute([':pw' => $hashed_password, ':id' => $user_id]);
 
-                $success = "Password successfully reset! You can now <a href='login.php'>login here</a>.";
-            } else {
-                $error = "Invalid or expired reset token.";
+                    $success = "Password successfully reset! You can now <a href='login.php'>login here</a>.";
+                } else {
+                    $error = "Invalid or expired reset token.";
+                }
+            } catch (\Throwable $e) {
+                $error = "Database error verifying token.";
             }
-            mysqli_stmt_close($stmt);
         }
     } else {
         $error = "Please fill in all fields.";

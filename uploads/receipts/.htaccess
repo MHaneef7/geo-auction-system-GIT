@@ -1,0 +1,6 @@
+# Secure Uploads Directory - Prevent execution of scripts
+<FilesMatch "(?i)\.(php|php3|php4|php5|phtml|pl|py|cgi|sh|exe)$">
+    Order Deny,Allow
+    Deny from all
+</FilesMatch>
+Options -ExecCGI

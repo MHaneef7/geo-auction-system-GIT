@@ -70,18 +70,28 @@ function initSearch() {
         
         searchTimeout = setTimeout(() => {
             $.ajax({
-                url: '/geo-auction-system/public/search/ajax',
+                url: 'ajax/search.php',
                 method: 'GET',
                 data: { q: query },
+                dataType: 'json',
                 success: function(data) {
-                    if (data.html) {
-                        results.html(data.html).show();
+                    if (data && data.results && data.results.length > 0) {
+                        const itemsHtml = data.results.map(r => `
+                            <a href="${r.url}" class="d-flex align-items-center gap-3 p-2 text-decoration-none border-bottom search-item-hover">
+                                <img src="${r.image}" style="width:40px;height:40px;object-fit:cover;border-radius:6px;" onerror="this.src='assets/image/placeholder.png'">
+                                <div class="flex-grow-1 min-w-0">
+                                    <div class="fw-semibold small text-truncate text-dark">${r.title}</div>
+                                    <div class="text-success small fw-bold">${r.price}</div>
+                                </div>
+                            </a>
+                        `).join('');
+                        results.html(itemsHtml).show();
                     } else {
-                        results.html('<div class="p-3 text-muted">No results found</div>').show();
+                        results.html('<div class="p-3 text-muted small text-center">No results found</div>').show();
                     }
                 },
                 error: function() {
-                    results.html('<div class="p-3 text-danger">Search failed</div>').show();
+                    results.html('<div class="p-3 text-danger small text-center">Search error. Please try again.</div>').show();
                 }
             });
         }, 300);
@@ -139,7 +149,7 @@ function loadBidHistory(auctionId) {
     if (!auctionId) return;
     
     $.ajax({
-        url: '/geo-auction-system/public/bid/history/' + auctionId,
+        url: 'live_auction.php?ajax=1&id=' + auctionId,
         method: 'GET',
         dataType: 'json',
         success: function(data) {
@@ -161,7 +171,7 @@ function initNotifications() {
     $(document).on('click', '.notification-item', function() {
         const id = $(this).data('id');
         if (id) {
-            $.post('/geo-auction-system/public/notification/read/' + id);
+            $.post('mark_as_read.php?notification_id=' + id);
             $(this).removeClass('unread');
         }
     });
@@ -169,17 +179,16 @@ function initNotifications() {
 
 function loadNotifications() {
     $.ajax({
-        url: '/geo-auction-system/public/notification/fetch',
+        url: 'ajax/notification.php?action=fetch',
         method: 'GET',
         dataType: 'json',
         success: function(data) {
-            if (data.count !== undefined) {
-                $('#notificationCount').text(data.count);
-                if (data.count > 0) {
-                    $('#notificationCount').show();
-                } else {
-                    $('#notificationCount').hide();
-                }
+            const count = data.unread !== undefined ? data.unread : (data.count !== undefined ? data.count : 0);
+            $('#notificationCount').text(count);
+            if (count > 0) {
+                $('#notificationCount').show();
+            } else {
+                $('#notificationCount').hide();
             }
             if (data.html) {
                 $('#notificationList').html(data.html);

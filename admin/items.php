@@ -12,124 +12,84 @@ require_admin('../index.php');
 $msg = '';
 $msg_type = 'success';
 $admin_id = (int)($_SESSION['user_id'] ?? 0);
-
-// CSRF Token setup
-if (empty($_SESSION['csrf_token'])) {
-    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-}
-$csrf_token = $_SESSION['csrf_token'];
-
-if (!function_exists('check_csrf')) {
-    function check_csrf($token) {
-        return !empty($token) && !empty($_SESSION['csrf_token']) && hash_equals($_SESSION['csrf_token'], $token);
-    }
-}
+$pdo = Database::getPdo();
 
 // Handle Admin Actions: Approve, Reject, End, Soft-Delete, Restore, Purge
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
-    $token = $_POST['csrf_token'] ?? '';
-    if (!check_csrf($token)) {
-        $msg = 'Invalid or expired security token (CSRF). Please reload the page.';
-        $msg_type = 'danger';
-    } else {
-        $action = $_POST['action'] ?? '';
-        $iid    = (int)($_POST['item_id'] ?? 0);
+    $action = $_POST['action'] ?? '';
+    $iid    = (int)($_POST['item_id'] ?? 0);
 
-        if ($iid > 0) {
-            if ($action === 'approve') {
-                $stmt = mysqli_prepare($conn, "UPDATE items SET status = 'active', is_deleted = 0 WHERE id = ?");
-                mysqli_stmt_bind_param($stmt, "i", $iid);
-                mysqli_stmt_execute($stmt);
-                mysqli_stmt_close($stmt);
-                $msg = 'Item #' . $iid . ' approved and set to active successfully.';
-            } elseif ($action === 'reject') {
-                $stmt = mysqli_prepare($conn, "UPDATE items SET status = 'cancelled' WHERE id = ?");
-                mysqli_stmt_bind_param($stmt, "i", $iid);
-                mysqli_stmt_execute($stmt);
-                mysqli_stmt_close($stmt);
-                $msg = 'Item #' . $iid . ' rejected and cancelled.';
-            } elseif ($action === 'end') {
-                $stmt = mysqli_prepare($conn, "UPDATE items SET status = 'ended' WHERE id = ?");
-                mysqli_stmt_bind_param($stmt, "i", $iid);
-                mysqli_stmt_execute($stmt);
-                mysqli_stmt_close($stmt);
-                $msg = 'Auction for item #' . $iid . ' ended.';
-            } elseif ($action === 'soft_delete') {
-                $stmt = mysqli_prepare($conn, "UPDATE items SET is_deleted = 1, deleted_at = NOW(), deleted_by = ? WHERE id = ?");
-                mysqli_stmt_bind_param($stmt, "ii", $admin_id, $iid);
-                mysqli_stmt_execute($stmt);
-                mysqli_stmt_close($stmt);
-                $msg = 'Item #' . $iid . ' has been soft-deleted (hidden from marketplace, preserved for audit).';
-            } elseif ($action === 'restore') {
-                $stmt = mysqli_prepare($conn, "UPDATE items SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL WHERE id = ?");
-                mysqli_stmt_bind_param($stmt, "i", $iid);
-                mysqli_stmt_execute($stmt);
-                mysqli_stmt_close($stmt);
-                $msg = 'Item #' . $iid . ' has been successfully restored to the active inventory.';
-            } elseif ($action === 'purge') {
-                // Permanent hard deletion with transaction & foreign key protection
-                mysqli_begin_transaction($conn);
-                try {
-                    // Break circular foreign key reference
-                    $stmt = mysqli_prepare($conn, "UPDATE items SET winning_bid_id = NULL WHERE id = ?");
-                    if ($stmt) {
-                        mysqli_stmt_bind_param($stmt, "i", $iid);
-                        mysqli_stmt_execute($stmt);
-                        mysqli_stmt_close($stmt);
-                    }
-
-                    // Delete child/dependent records safely
-                    $dependents = ['bids', 'wishlist', 'item_images', 'item_comments', 'item_reports', 'auto_bids', 'payments', 'reviews', 'reports'];
-                    foreach ($dependents as $tbl) {
-                        $chk = mysqli_query($conn, "SHOW TABLES LIKE '$tbl'");
-                        if ($chk && mysqli_num_rows($chk) > 0) {
-                            $col_chk = mysqli_query($conn, "SHOW COLUMNS FROM `$tbl` LIKE 'item_id'");
-                            if ($col_chk && mysqli_num_rows($col_chk) > 0) {
-                                $del_s = mysqli_prepare($conn, "DELETE FROM `$tbl` WHERE item_id = ?");
-                                if ($del_s) {
-                                    mysqli_stmt_bind_param($del_s, "i", $iid);
-                                    mysqli_stmt_execute($del_s);
-                                    mysqli_stmt_close($del_s);
-                                }
-                            }
-                        }
-                    }
-
-                    // Delete item record itself
-                    $stmt = mysqli_prepare($conn, "DELETE FROM items WHERE id = ?");
-                    mysqli_stmt_bind_param($stmt, "i", $iid);
-                    mysqli_stmt_execute($stmt);
-                    mysqli_stmt_close($stmt);
-
-                    mysqli_commit($conn);
-                    $msg = 'Item #' . $iid . ' and all related child records were permanently purged from the database.';
-                    $msg_type = 'danger';
-                } catch (\Throwable $e) {
-                    mysqli_rollback($conn);
-                    $msg = 'Error purging item: ' . $e->getMessage();
-                    $msg_type = 'danger';
-                }
+    if ($iid > 0) {
+        if ($action === 'approve') {
+            $stmt = $pdo->prepare("UPDATE items SET status = 'active', is_deleted = 0 WHERE id = :id");
+            $stmt->execute([':id' => $iid]);
+            $msg = 'Item #' . $iid . ' approved and set to active successfully.';
+        } elseif ($action === 'reject') {
+            $stmt = $pdo->prepare("UPDATE items SET status = 'cancelled' WHERE id = :id");
+            $stmt->execute([':id' => $iid]);
+            $msg = 'Item #' . $iid . ' rejected and cancelled.';
+        } elseif ($action === 'end') {
+            $stmt = $pdo->prepare("UPDATE items SET status = 'ended' WHERE id = :id");
+            $stmt->execute([':id' => $iid]);
+            $msg = 'Auction for item #' . $iid . ' ended.';
+        } elseif ($action === 'soft_delete') {
+            $cols = $pdo->query("SHOW COLUMNS FROM items")->fetchAll(PDO::FETCH_COLUMN);
+            $hasDeletedBy = in_array('deleted_by', $cols, true);
+            if ($hasDeletedBy) {
+                $stmt = $pdo->prepare("UPDATE items SET is_deleted = 1, deleted_at = NOW(), deleted_by = :uid WHERE id = :id");
+                $stmt->execute([':uid' => $admin_id, ':id' => $iid]);
+            } else {
+                $stmt = $pdo->prepare("UPDATE items SET is_deleted = 1, deleted_at = NOW() WHERE id = :id");
+                $stmt->execute([':id' => $iid]);
             }
+            $msg = 'Item #' . $iid . ' has been soft-deleted (hidden from marketplace, preserved for audit).';
+        } elseif ($action === 'restore') {
+            $cols = $pdo->query("SHOW COLUMNS FROM items")->fetchAll(PDO::FETCH_COLUMN);
+            $hasDeletedBy = in_array('deleted_by', $cols, true);
+            if ($hasDeletedBy) {
+                $stmt = $pdo->prepare("UPDATE items SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL WHERE id = :id");
+            } else {
+                $stmt = $pdo->prepare("UPDATE items SET is_deleted = 0, deleted_at = NULL WHERE id = :id");
+            }
+            $stmt->execute([':id' => $iid]);
+            $msg = 'Item #' . $iid . ' has been successfully restored to the active inventory.';
+        } elseif ($action === 'purge') {
+            // Permanent hard deletion
+            $pdo->prepare("DELETE FROM bids WHERE item_id = :id")->execute([':id' => $iid]);
+            $pdo->prepare("DELETE FROM wishlist WHERE item_id = :id")->execute([':id' => $iid]);
+            try {
+                $pdo->prepare("DELETE FROM item_images WHERE item_id = :id")->execute([':id' => $iid]);
+            } catch (Throwable $e) {}
+            $pdo->prepare("DELETE FROM items WHERE id = :id")->execute([':id' => $iid]);
+            $msg = 'Item #' . $iid . ' and all related bids were permanently purged from the database.';
+            $msg_type = 'danger';
         }
     }
 }
 
-$filter    = isset($_GET['status']) ? mysqli_real_escape_string($conn, $_GET['status']) : '';
-$search    = isset($_GET['search']) ? mysqli_real_escape_string($conn, trim($_GET['search'])) : '';
+$filter    = trim((string)($_GET['status'] ?? ''));
+$search    = trim((string)($_GET['search'] ?? ''));
 $view_mode = isset($_GET['view']) && $_GET['view'] === 'cards' ? 'cards' : 'table';
 
 $where_parts = [];
+$params = [];
+
 if ($filter === 'deleted') {
     $where_parts[] = "i.is_deleted = 1";
 } elseif ($filter !== '') {
-    $where_parts[] = "i.status = '$filter' AND i.is_deleted = 0";
+    $where_parts[] = "i.status = :status AND (i.is_deleted = 0 OR i.is_deleted IS NULL)";
+    $params[':status'] = $filter;
 }
-if ($search) {
-    $where_parts[] = "(i.title LIKE '%$search%' OR u.name LIKE '%$search%' OR i.auction_code LIKE '%$search%')";
+if ($search !== '') {
+    $where_parts[] = "(i.title LIKE :s1 OR u.name LIKE :s2 OR i.auction_code LIKE :s3)";
+    $term = '%' . $search . '%';
+    $params[':s1'] = $term;
+    $params[':s2'] = $term;
+    $params[':s3'] = $term;
 }
 $where = count($where_parts) ? 'WHERE ' . implode(' AND ', $where_parts) : '';
 
-$items_res = mysqli_query($conn, "
+$stmt = $pdo->prepare("
     SELECT i.*, u.name AS seller_name, c.name AS category_name,
            (SELECT COUNT(*) FROM bids b WHERE b.item_id = i.id) AS bid_count
     FROM items i
@@ -138,16 +98,14 @@ $items_res = mysqli_query($conn, "
     $where
     ORDER BY i.is_deleted DESC, i.id DESC
 ");
+$stmt->execute($params);
+$items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Counts for filter pills
-$cnt_total_res   = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items");
-$cnt_total       = mysqli_fetch_assoc($cnt_total_res)['c'] ?? 0;
-$cnt_active_res  = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'active' AND is_deleted = 0");
-$cnt_active      = mysqli_fetch_assoc($cnt_active_res)['c'] ?? 0;
-$cnt_pending_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE status = 'pending' AND is_deleted = 0");
-$cnt_pending     = mysqli_fetch_assoc($cnt_pending_res)['c'] ?? 0;
-$cnt_deleted_res = mysqli_query($conn, "SELECT COUNT(*) AS c FROM items WHERE is_deleted = 1");
-$cnt_deleted     = mysqli_fetch_assoc($cnt_deleted_res)['c'] ?? 0;
+$cnt_total   = (int)$pdo->query("SELECT COUNT(*) FROM items")->fetchColumn();
+$cnt_active  = (int)$pdo->query("SELECT COUNT(*) FROM items WHERE status = 'active' AND (is_deleted = 0 OR is_deleted IS NULL)")->fetchColumn();
+$cnt_pending = (int)$pdo->query("SELECT COUNT(*) FROM items WHERE status = 'pending' AND (is_deleted = 0 OR is_deleted IS NULL)")->fetchColumn();
+$cnt_deleted = (int)$pdo->query("SELECT COUNT(*) FROM items WHERE is_deleted = 1")->fetchColumn();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -239,10 +197,10 @@ $cnt_deleted     = mysqli_fetch_assoc($cnt_deleted_res)['c'] ?? 0;
         <a href="categories.php"><i class="fas fa-tags me-2"></i> Categories</a>
         <a href="items.php" class="active"><i class="fas fa-box-open me-2"></i> Items (Cards & Table)</a>
         <a href="bids.php"><i class="fas fa-hand-holding-usd me-2"></i> Bids</a>
+        <a href="payments.php"><i class="fas fa-credit-card me-2"></i> Payments</a>
         
         <div class="nav-category">System</div>
         <a href="reports.php"><i class="fas fa-chart-line me-2"></i> Reports</a>
-        <a href="setting.php"><i class="fas fa-database me-2"></i> Database & Backup</a>
         <a href="logout.php" class="text-danger mt-4"><i class="fas fa-sign-out-alt me-2"></i> Logout</a>
     </div>
 
@@ -341,11 +299,11 @@ $cnt_deleted     = mysqli_fetch_assoc($cnt_deleted_res)['c'] ?? 0;
 
         <!-- VIEW MODE 1: UNIFIED CARDS VIEW -->
         <?php if ($view_mode === 'cards'): ?>
-            <?php if ($items_res && mysqli_num_rows($items_res) > 0): ?>
+            <?php if (!empty($items)): ?>
                 <div class="admin-cards-grid">
                     <?php 
                     // Render using the Unified Card Component
-                    while ($item = mysqli_fetch_assoc($items_res)) {
+                    foreach ($items as $item) {
                         render_unified_item_card($item, 'admin', $admin_id, ['is_subfolder' => true]);
                     }
                     ?>
@@ -377,8 +335,8 @@ $cnt_deleted     = mysqli_fetch_assoc($cnt_deleted_res)['c'] ?? 0;
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php if ($items_res && mysqli_num_rows($items_res) > 0): ?>
-                                    <?php while ($item = mysqli_fetch_assoc($items_res)): 
+                                <?php if (!empty($items)): ?>
+                                    <?php foreach ($items as $item): 
                                         $is_del = !empty($item['is_deleted']);
                                     ?>
                                     <tr class="<?php echo $is_del ? 'table-row-deleted' : ''; ?>">
@@ -475,7 +433,6 @@ $cnt_deleted     = mysqli_fetch_assoc($cnt_deleted_res)['c'] ?? 0;
                                                 <?php if ($is_del): ?>
                                                     <!-- Restore Action -->
                                                     <form method="POST" class="d-inline">
-                                                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                                         <input type="hidden" name="action" value="restore">
                                                         <input type="hidden" name="item_id" value="<?php echo $item['id']; ?>">
                                                         <button type="submit" class="btn btn-sm btn-outline-success fw-semibold" title="Restore to Active Catalog">
@@ -484,7 +441,6 @@ $cnt_deleted     = mysqli_fetch_assoc($cnt_deleted_res)['c'] ?? 0;
                                                     </form>
                                                     <!-- Permanent Purge Action -->
                                                     <form method="POST" class="d-inline" onsubmit="return confirm('PERMANENT PURGE: Delete this item and all associated bid records forever?');">
-                                                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                                         <input type="hidden" name="action" value="purge">
                                                         <input type="hidden" name="item_id" value="<?php echo $item['id']; ?>">
                                                         <button type="submit" class="btn btn-sm btn-danger fw-semibold" title="Permanently Delete (Purge)">
@@ -495,7 +451,6 @@ $cnt_deleted     = mysqli_fetch_assoc($cnt_deleted_res)['c'] ?? 0;
                                                     <!-- Normal Actions -->
                                                     <?php if ($item['status'] === 'pending'): ?>
                                                     <form method="POST" class="d-inline">
-                                                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                                         <input type="hidden" name="action" value="approve">
                                                         <input type="hidden" name="item_id" value="<?php echo $item['id']; ?>">
                                                         <button type="submit" class="btn btn-sm btn-outline-success" title="Approve Item"><i class="fas fa-check"></i></button>
@@ -506,9 +461,14 @@ $cnt_deleted     = mysqli_fetch_assoc($cnt_deleted_res)['c'] ?? 0;
                                                         <i class="fas fa-pen"></i>
                                                     </a>
 
+                                                    <?php if ($item['status'] === 'sold' || $item['status'] === 'ended'): ?>
+                                                    <a href="../invoice.php?item_id=<?php echo $item['id']; ?>" class="btn btn-sm btn-outline-success" title="View Official Invoice / PDF" target="_blank">
+                                                        <i class="fas fa-file-invoice"></i>
+                                                    </a>
+                                                    <?php endif; ?>
+
                                                     <!-- Soft Delete Action -->
                                                     <form method="POST" class="d-inline" onsubmit="return confirm('Soft-delete this item? It will be removed from the public marketplace but kept in admin audit.');">
-                                                        <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars($csrf_token); ?>">
                                                         <input type="hidden" name="action" value="soft_delete">
                                                         <input type="hidden" name="item_id" value="<?php echo $item['id']; ?>">
                                                         <button type="submit" class="btn btn-sm btn-outline-danger" title="Soft Delete Item"><i class="fas fa-trash"></i></button>
@@ -517,7 +477,7 @@ $cnt_deleted     = mysqli_fetch_assoc($cnt_deleted_res)['c'] ?? 0;
                                             </div>
                                         </td>
                                     </tr>
-                                    <?php endwhile; ?>
+                                    <?php endforeach; ?>
                                 <?php else: ?>
                                     <tr><td colspan="9" class="text-center py-4 text-muted">No auction lots found matching query.</td></tr>
                                 <?php endif; ?>

@@ -38,6 +38,7 @@ function render_profile_reviews_messages(int $profileUserId, ?PDO $pdo = null, i
                 m.sender_id,
                 m.receiver_id,
                 m.message,
+                m.message AS message_body,
                 m.subject,
                 m.created_at,
                 u.name AS sender_name,
